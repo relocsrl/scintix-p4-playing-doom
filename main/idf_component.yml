@@ -1,0 +1,14 @@
+dependencies:
+  espressif/esp_codec_dev: ^1.3.4
+  dns_server:
+    path: ${IDF_PATH}/examples/protocols/http_server/captive_portal/components/dns_server
+  usb_host_hid:
+    version: "^1.0.1"
+  espressif/esp_hosted:
+    version: "~1"
+    rules:
+      - if: "target in [esp32p4, esp32h2]"
+  espressif/esp_wifi_remote:
+    version: "*"
+    rules:
+      - if: "target in [esp32p4]"
