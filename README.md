@@ -31,21 +31,26 @@
 <p align="center">
 If you like this project ---->-<a href="https://www.buymeacoffee.com/mazur888" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="35" width="auto"></a>
 </p>
-  
-## Game loaded:  
-<img width="3072" height="3350" alt="doom" src="https://github.com/user-attachments/assets/9ae8dea2-f8eb-4172-adaa-764856c08f69" />
-  
-## PCB:  
-<img width="3072" height="4080" alt="guilion" src="https://github.com/user-attachments/assets/166c3e6f-90d6-4aa8-9752-b9ea89f1b835" />
-  
-## Webserver settings page:  
-  
-<img width="742" height="810" alt="Screenshot From 2026-05-13 09-07-36" src="https://github.com/user-attachments/assets/50d1c964-82e7-4bca-8fe7-3f806de12ebc" />
 
-## Compilation  
+
+# Game loaded:  
+
+<img width="3072" height="3079" alt="doom" src="https://github.com/user-attachments/assets/0db3d336-9963-4297-9a27-9159b00e9478" />  
+  
+# PCB:  
+  
+<img width="3072" height="4080" alt="guilion" src="https://github.com/user-attachments/assets/1b2c12bf-574f-4a0d-8460-e3b40288d8a2" />  
+  
+# Webserver settings page:  
+  
+<img width="742" height="810" alt="Screenshot From 2026-05-13 09-07-36" src="https://github.com/user-attachments/assets/b98c160f-bbfc-446d-9018-aa7147e0e68b" />  
+  
+# Compilation  
 **Make sure esp32p4 is selected in iDF**  
   
-
+<img width="700" height="182" alt="Screenshot From 2026-05-13 12-52-29" src="https://github.com/user-attachments/assets/940645ac-82da-4d1a-b095-ab5c8ee1855e" />  
+  
+  
 ## License
 This project is released under the [GNU GPL v3.0](LICENSE).  
 © 2026 Mazur888. No warranty; use at your own risk.  
