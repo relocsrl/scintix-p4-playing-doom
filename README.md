@@ -1,62 +1,76 @@
-# DOOM for ESP32-P4 + ESP32-C6 Guilion JC4880P443 Screen
+# DOOM on the Scintix P4 (ESP32-P4 + ESP32-C6)
 
-## Working port of DOOM with PS4 controller and Audio!
-[>>>  YOUTUBE <<<](https://www.youtube.com/watch?v=7lf0nKiRfZQ)  
+A port of DOOM running on the **Scintix P4**, our custom board based on the
+**ESP32-P4** with an **ESP32-C6** wireless co-processor.
 
+> **This is a fork.** It started from the excellent ESP32-P4 DOOM port by
+> **Mazur888** — [mazur888/DOOM-working-on-ESP32-P4-C6](https://github.com/mazur888/DOOM-working-on-ESP32-P4-C6),
+> which targets the Guition **JC4880P443** panel (ST7701S, 480×800). This fork
+> adapts that work to the **Scintix P4** hardware, whose display and wiring differ.
 
-## Hardware  
-- JC4880P443 Display  
-- 8Ohm 2W speaker  
-- PS4 controller (wired only, controller bluetooth sees not compatible with C6)
-- P4 chip is very powerful, gameplay is very smooth
+## Target hardware (Scintix P4)
 
-## Software  
-- Web server available to change color and volume settings  
-- Wifi works in AP mode + captive portal  
-- WAD file is forked from https://github.com/Akbar30Bill/DOOM_wads  
-- compiled in VSC + IDF v5.5.0  
-- Code takes about 12Mb of space and it is all loaded to SPIFFS, so flashing takes some time
+- **MCU**: ESP32-P4 (rev. v3.1), 32 MB hex PSRAM, 32 MB flash.
+- **Wireless co-processor**: ESP32-C6 over SDIO (4-bit), Wi-Fi provided to the P4
+  via `esp_hosted` / `esp_wifi_remote`.
+- **Display**: 7" **1024×600 MIPI-DSI** panel driven by the **EK79007** controller
+  (landscape).
+- **Audio**: I²S codec + speaker.
+- **Controls**: USB PS4 (DualShock 4) controller, **wired only** (the C6 path is
+  not used for the gamepad).
 
-## Power up  
-- First you will hear beep and see pattern to confirm speaker and screen are operational  
-- Game will load in about minute after so be patient
-- If colors are swapped or inverted, adjust it in web server  
-  
-## wifi portal  
-- wifi advertises as JC4880P443_xxxxxx with no password (xxxxxx is last 6 characters of device MAC)
-- Connect and enter your own SSID and Password  
-- Use serial monitor or network scanner to get your IP address  
-  
-  
-<p align="center">
-If you like this project ---->-<a href="https://www.buymeacoffee.com/mazur888" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="35" width="auto"></a>
-</p>
+## What this fork changes vs. the original
 
+- **Display bring-up via BSP.** The original hand-wrote the ST7701S/MIPI init for
+  the 480×800 portrait panel. This fork delegates display setup to the Espressif
+  `esp32_p4_function_ev_board` BSP (vendored under `components/`), which drives the
+  EK79007 1024×600 panel — the same proven path used by the board's Brookesia demo.
+- **Landscape orientation.** The EK79007 is natively landscape, so the default
+  panel rotation is `0` (the original rotated 90° for its portrait panel).
+- **MIPI-DSI PHY clock fix** for ESP32-P4 rev ≥ 3.0 (the legacy `PLL_F20M` source
+  is invalid on this silicon; the driver default — XTAL — is used instead).
+- **Rendering performance work** (in progress): nearest-neighbour scaling LUTs
+  replacing per-pixel integer divides, plus build tuning (`-O2`, PSRAM 250 MHz).
+- **Stability fix**: larger HTTP server task stack to avoid a stack overflow when
+  serving the configuration pages.
 
-# Game loaded:  
+## Software features (inherited)
 
-<img width="3072" height="3079" alt="doom" src="https://github.com/user-attachments/assets/0db3d336-9963-4297-9a27-9159b00e9478" />  
-  
-# PCB:  
-  
-<img width="3072" height="4080" alt="guilion" src="https://github.com/user-attachments/assets/1b2c12bf-574f-4a0d-8460-e3b40288d8a2" />  
-  
-# Webserver settings page:  
-  
-<img width="742" height="810" alt="Screenshot From 2026-05-13 09-07-36" src="https://github.com/user-attachments/assets/b98c160f-bbfc-446d-9018-aa7147e0e68b" />  
-  
-# Compilation  
-**Make sure esp32p4 is selected in iDF**  
-  
-<img width="700" height="182" alt="Screenshot From 2026-05-13 12-52-29" src="https://github.com/user-attachments/assets/940645ac-82da-4d1a-b095-ab5c8ee1855e" />  
-  
-  
+- Wi-Fi in **AP mode + captive portal** for first-time setup.
+- Web server to tweak display (rotation, colour, FPS overlay) and audio settings.
+- WAD shipped in SPIFFS. WAD forked from
+  [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads).
+
+## Build, flash and monitor
+
+Built with **ESP-IDF v5.5.x**.
+
+```bash
+idf.py set-target esp32p4
+idf.py build flash monitor
+```
+
+The WAD and config live in the SPIFFS image (`storage` partition, ~12 MB), so the
+first flash takes a while.
+
+## First boot
+
+- A colour **test pattern** is drawn to confirm the panel and MIPI link are alive,
+  then the game loads.
+- If colours look swapped/inverted, adjust them in the web settings page.
+
+## Wi-Fi portal
+
+- On first boot the device starts an **open Access Point** and a captive portal.
+- Connect, enter your Wi-Fi SSID and password, and save.
+- Use the serial monitor or a network scanner to find the device IP, then open it
+  in a browser for the settings page.
+
 ## License
-This project is released under the [GNU GPL v3.0](LICENSE).  
-© 2026 Mazur888. No warranty; use at your own risk.  
-  
-  
-  
-  
 
+This project is released under the [GNU GPL v3.0](LICENSE).
 
+- Original work © 2026 **Mazur888**.
+- Scintix P4 adaptations © 2026 **RELOC s.r.l.**.
+
+No warranty; use at your own risk.
