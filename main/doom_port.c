@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -211,6 +212,20 @@ static bool wad_exists(void)
     return true;
 }
 
+/* Printed raw (not through ESP_LOG) so the figlet "Doom" font stays aligned in
+ * the serial console, with no per-line timestamp/tag prefix mangling it. */
+static void print_doom_banner(void)
+{
+    printf("\n"
+           "______  _____  _____ ___  ___ \n"
+           "|  _  \\|  _  ||  _  ||  \\/  |\n"
+           "| | | || | | || | | || .  . |\n"
+           "| | | || | | || | | || |\\/| |\n"
+           "| |/ / \\ \\_/ /\\ \\_/ /| |  | |\n"
+           "|___/   \\___/  \\___/ \\_|  |_/ \n"
+           "      SCINTIX P4  -  rip and tear!\n\n");
+}
+
 static void doom_task(void *arg)
 {
     (void)arg;
@@ -235,6 +250,7 @@ static void doom_task(void *arg)
     };
     int argc = sizeof(argv) / sizeof(argv[0]);
 
+    print_doom_banner();
     ESP_LOGI(TAG, "Starting Doom");
     doomgeneric_Create(argc, argv);
 
