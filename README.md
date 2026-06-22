@@ -1,5 +1,10 @@
 # DOOM on the SCINTIX P4 (ESP32-P4 + ESP32-C6)
 
+> ### 🚀 The SCINTIX P4 is live on Crowd Supply!
+> The board this project runs on is **crowdfunding now** —
+> **[back it on Crowd Supply →](https://www.crowdsupply.com/reloc/scintix-p4)**.
+> Help bring the SCINTIX P4 to life. 🎮
+
 A port of DOOM running on the **SCINTIX P4**, our custom board based on the
 **ESP32-P4** with an **ESP32-C6** wireless co-processor.
 
