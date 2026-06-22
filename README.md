@@ -29,10 +29,21 @@ A port of DOOM running on the **Scintix P4**, our custom board based on the
   panel rotation is `0` (the original rotated 90° for its portrait panel).
 - **MIPI-DSI PHY clock fix** for ESP32-P4 rev ≥ 3.0 (the legacy `PLL_F20M` source
   is invalid on this silicon; the driver default — XTAL — is used instead).
-- **Rendering performance work** (in progress): nearest-neighbour scaling LUTs
-  replacing per-pixel integer divides, plus build tuning (`-O2`, PSRAM 250 MHz).
+- **Hardware-accelerated rendering (PPA).** The Doom frame (320×200) is upscaled
+  to 1024×600 by the ESP32-P4 **PPA** (Pixel Processing Accelerator):
+  `ppa_do_scale_rotate_mirror` scales — and optionally rotates 180° — straight into
+  a DPI frame buffer, then `esp_lcd_panel_draw_bitmap` performs a **zero-copy
+  page-flip**. With **double buffering** (two DPI frame buffers) this is tear-free.
+  This replaces the per-frame CPU scale+blit (~24.5 ms) with a ~9 ms hardware op.
+- **CPU scaler fallback.** A nearest-neighbour software scaler — scaling LUTs (no
+  per-pixel divide) plus identical-row `memcpy` dedup — stays in place for the
+  cases the PPA fast path doesn't cover (colour adjustment, 90°/270° rotation).
+- **Build/runtime tuning**: `-O2`, PSRAM @ 250 MHz, flash QIO, 1 kHz FreeRTOS tick.
 - **Stability fix**: larger HTTP server task stack to avoid a stack overflow when
   serving the configuration pages.
+
+Together these bring the game to a steady **~30 FPS** — Doom's own software renderer
+(~25 ms/frame) and the 35 Hz game tick (`TICRATE`) are now the limiting factors.
 
 ## Software features (inherited)
 
@@ -61,7 +72,8 @@ first flash takes a while.
 
 ## Wi-Fi portal
 
-- On first boot the device starts an **open Access Point** and a captive portal.
+- On first boot the device starts an **open Access Point** (SSID
+  `Scintix-P4-XXXXXX`, where the suffix is derived from the MAC) and a captive portal.
 - Connect, enter your Wi-Fi SSID and password, and save.
 - Use the serial monitor or a network scanner to find the device IP, then open it
   in a browser for the settings page.

@@ -32,6 +32,11 @@ flasher_args.json # Generated in build directory
 sdkconfig.old
 sdkconfig
 
+# Espressif Eclipse IDE project files (user/machine specific)
+.cproject
+.project
+.settings/
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/

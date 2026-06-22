@@ -1,7 +1,7 @@
 /*
- * Doom for the JC4880P443 ESP32-P4 + ESP32-C6 panel.
+ * Doom for the Scintix P4 (ESP32-P4 + ESP32-C6, EK79007 1024x600 panel).
  *
- * mazur888 2026
+ * Ported from the JC4880P443 version by mazur888 (2026).
  *
  */
 
@@ -39,7 +39,7 @@
 #include "usb_gamepad.h"
 #include "bsp/esp-bsp.h"
 
-static const char *TAG = "jc4880p443";
+static const char *TAG = "scintix_p4";
 static const char *NET_TAG = "wifi_portal";
 
 /*
@@ -232,7 +232,7 @@ static void get_portal_ssid(char *ssid, size_t ssid_len)
 {
     uint8_t mac[6] = {};
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_BASE));
-    snprintf(ssid, ssid_len, "JC4880P443-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    snprintf(ssid, ssid_len, "Scintix-P4-%02X%02X%02X", mac[3], mac[4], mac[5]);
 }
 
 static void portal_send_page(httpd_req_t *req, const char *status)
@@ -243,11 +243,11 @@ static void portal_send_page(httpd_req_t *req, const char *status)
     char page[1500];
     int len = snprintf(page, sizeof(page),
                        "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                       "<title>JC4880P443 Wi-Fi</title>"
+                       "<title>Scintix P4 Wi-Fi</title>"
                        "<style>body{font-family:sans-serif;margin:2rem;max-width:34rem}"
                        "input,button{box-sizing:border-box;font-size:1rem;margin:.35rem 0;padding:.7rem;width:100%%}"
                        "button{font-weight:700}</style></head><body>"
-                       "<h2>JC4880P443 Wi-Fi</h2><p>%s</p>"
+                       "<h2>Scintix P4 Wi-Fi</h2><p>%s</p>"
                        "<form action=\"/save\" method=\"post\">"
                        "<label>SSID</label><input name=\"ssid\" maxlength=\"32\" autocomplete=\"off\" value=\"%s\" autofocus>"
                        "<label>Password</label><input name=\"password\" maxlength=\"64\" type=\"password\">"

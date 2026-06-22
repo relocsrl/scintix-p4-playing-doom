@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "driver/ppa.h"
+#include "esp_cache.h"
 #include "esp_heap_caps.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_timer.h"
@@ -25,6 +28,19 @@
 static esp_lcd_panel_handle_t s_panel;
 static SemaphoreHandle_t s_panel_lock;
 static portMUX_TYPE s_settings_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* PPA (Pixel Processing Accelerator) fast path. When the colour settings are
+ * neutral and rotation is 0/180, the scale+rotate+framebuffer-write that the
+ * CPU otherwise does is offloaded to the PPA SRM engine, which writes straight
+ * into a DPI frame buffer. With two frame buffers we render into the back one
+ * and page-flip; with one we render into the live buffer. */
+#define DPI_MAX_FBS 3
+static ppa_client_handle_t s_ppa_client;
+static bool s_ppa_init_done;     /* init attempted (success or not) */
+static bool s_ppa_available;     /* fast path usable */
+static void *s_dpi_fbs[DPI_MAX_FBS];
+static int s_dpi_num_fbs;
+static int s_dpi_render_idx;     /* frame buffer the next frame renders into */
 #define DOOM_LINE_BUFFERS 3
 static uint16_t *s_doom_lines[DOOM_LINE_BUFFERS];
 static size_t s_doom_lines_pixels;
@@ -437,6 +453,135 @@ static bool ensure_scale_maps(int dst_w, int dst_h, int logical_w, int logical_h
     return true;
 }
 
+/* Register the PPA SRM client and grab the DPI frame buffer pointer(s). Runs
+ * once, lazily, on the first draw. On any failure the fast path stays off and
+ * the CPU scaler is used. */
+static void ppa_lazy_init(void)
+{
+    if (s_ppa_init_done) {
+        return;
+    }
+    s_ppa_init_done = true;
+    if (s_panel == NULL) {
+        return;
+    }
+
+    /* The driver allocates CONFIG_BSP_LCD_DPI_BUFFER_NUMS frame buffers; probe
+     * downwards from the most we support until get_frame_buffer accepts the
+     * count (it rejects counts above num_fbs). */
+    for (int n = DPI_MAX_FBS; n >= 1; n--) {
+        esp_err_t err;
+        if (n == 3) {
+            err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 3, &s_dpi_fbs[0], &s_dpi_fbs[1], &s_dpi_fbs[2]);
+        } else if (n == 2) {
+            err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_dpi_fbs[0], &s_dpi_fbs[1]);
+        } else {
+            err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_dpi_fbs[0]);
+        }
+        if (err == ESP_OK) {
+            s_dpi_num_fbs = n;
+            break;
+        }
+    }
+    if (s_dpi_num_fbs == 0) {
+        ESP_LOGW("panel_perf", "PPA: no DPI frame buffer, using CPU scaler");
+        return;
+    }
+
+    ppa_client_config_t cfg = {
+        .oper_type = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+        .data_burst_length = PPA_DATA_BURST_LENGTH_128,
+    };
+    if (ppa_register_client(&cfg, &s_ppa_client) != ESP_OK) {
+        ESP_LOGW("panel_perf", "PPA: register client failed, using CPU scaler");
+        return;
+    }
+
+    /* The scale factor quantizes to 3.1875x (1020 px), so PPA never writes the
+     * rightmost ~4 columns, nor any letterbox rows. Clear every frame buffer to
+     * black once now so those untouched regions don't show stale boot/test-
+     * pattern data (which, differing between the two buffers, flickered as we
+     * page-flipped). PPA never overwrites them again, so this stays black. */
+    const size_t fb_size = (size_t)PANEL_DISPLAY_WIDTH * PANEL_DISPLAY_HEIGHT * sizeof(uint16_t);
+    for (int i = 0; i < s_dpi_num_fbs; i++) {
+        memset(s_dpi_fbs[i], 0, fb_size);
+        esp_cache_msync(s_dpi_fbs[i], fb_size, ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    }
+
+    /* fb0 is the buffer the driver scans out first, so begin rendering into the
+     * other one (if any) to avoid drawing over the live frame. */
+    s_dpi_render_idx = (s_dpi_num_fbs > 1) ? 1 : 0;
+    s_ppa_available = true;
+    ESP_LOGI("panel_perf", "PPA ready: %d DPI frame buffer(s)", s_dpi_num_fbs);
+}
+
+/* Hardware scale (and optional 180° rotate) of the Doom frame straight into a
+ * DPI frame buffer, then page-flip. Caller must hold s_panel_lock and must have
+ * checked s_ppa_available + neutral colours + rotation 0/180. dst_y0 letterbox
+ * rows are left untouched (the buffers start black and PPA never writes them).
+ * Returns ESP_OK on success; on error the caller falls back to the CPU path. */
+static esp_err_t ppa_draw_doom(const uint16_t *src, int src_w, int src_h,
+                               const panel_display_settings_t *settings,
+                               int dst_w, int dst_h, int dst_y0)
+{
+    void *fb = s_dpi_fbs[s_dpi_render_idx];
+    const size_t fb_size = (size_t)PANEL_DISPLAY_WIDTH * PANEL_DISPLAY_HEIGHT * sizeof(uint16_t);
+
+    ppa_srm_oper_config_t op = {
+        .in = {
+            .buffer = src,
+            .pic_w = (uint32_t)src_w,
+            .pic_h = (uint32_t)src_h,
+            .block_w = (uint32_t)src_w,
+            .block_h = (uint32_t)src_h,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .out = {
+            .buffer = fb,
+            .buffer_size = fb_size,
+            .pic_w = PANEL_DISPLAY_WIDTH,
+            .pic_h = PANEL_DISPLAY_HEIGHT,
+            .block_offset_y = (uint32_t)dst_y0,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .rotation_angle = (settings->rotation == PANEL_ROTATION_180)
+                              ? PPA_SRM_ROTATION_ANGLE_180
+                              : PPA_SRM_ROTATION_ANGLE_0,
+        /* Scale factor is quantized to 1/16 in hardware, so e.g. 1024/320=3.2
+         * actually renders at 3.1875 (1020 px wide); the few unwritten edge
+         * columns stay black. */
+        .scale_x = (float)dst_w / (float)src_w,
+        .scale_y = (float)dst_h / (float)src_h,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+
+    esp_err_t err = ppa_do_scale_rotate_mirror(s_ppa_client, &op);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (settings->show_fps) {
+        /* Draw the overlay straight into the frame buffer (full-frame addressing
+         * via chunk_y0=0). The draw_bitmap below writes it back from cache. */
+        draw_fps_overlay((uint16_t *)fb, 0, PANEL_DISPLAY_HEIGHT, PANEL_DISPLAY_WIDTH, s_fps_value_x10);
+    }
+
+    /* Hand the buffer back to the panel. Because it lies inside one of the
+     * driver's own frame buffers, draw_bitmap does no copy: it just writes back
+     * the (overlay) cache lines and switches the scanout to this buffer at the
+     * next frame boundary. */
+    err = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, PANEL_DISPLAY_WIDTH, PANEL_DISPLAY_HEIGHT, fb);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (s_dpi_num_fbs > 1) {
+        s_dpi_render_idx = (s_dpi_render_idx + 1) % s_dpi_num_fbs;
+    }
+    return ESP_OK;
+}
+
 esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src_h)
 {
     if (s_panel == NULL || src == NULL || src_w <= 0 || src_h <= 0) {
@@ -463,6 +608,37 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
         dst_h = PANEL_DISPLAY_HEIGHT;
     }
     const int dst_y0 = (dst_screen_h - dst_h) / 2;
+
+    /* PPA hardware fast path: neutral colours and rotation 0/180 only. Anything
+     * else (colour adjust, 90/270) falls through to the CPU scaler below. */
+    ppa_lazy_init();
+    if (s_ppa_available && color_settings_are_neutral(&settings) &&
+        (settings.rotation == PANEL_ROTATION_0 || settings.rotation == PANEL_ROTATION_180)) {
+        const int64_t ppa_t0 = esp_timer_get_time(); /* PERF */
+        esp_err_t perr;
+        if (s_panel_lock != NULL) {
+            xSemaphoreTake(s_panel_lock, portMAX_DELAY);
+        }
+        perr = ppa_draw_doom(src, src_w, src_h, &settings, dst_w, dst_h, dst_y0);
+        if (s_panel_lock != NULL) {
+            xSemaphoreGive(s_panel_lock);
+        }
+        if (perr == ESP_OK) {
+            /* PERF: average PPA scale+flip time, compared against on-screen FPS. */
+            static int64_t s_ppa_us_accum;
+            static uint32_t s_ppa_us_frames;
+            s_ppa_us_accum += esp_timer_get_time() - ppa_t0;
+            if (++s_ppa_us_frames >= 64) {
+                ESP_LOGI("panel_perf", "ppa scale+flip %lld us/frame",
+                         (long long)(s_ppa_us_accum / s_ppa_us_frames));
+                s_ppa_us_accum = 0;
+                s_ppa_us_frames = 0;
+            }
+            return ESP_OK;
+        }
+        ESP_LOGW("panel_perf", "PPA draw failed (%s), CPU fallback", esp_err_to_name(perr));
+    }
+
     const int lines_per_chunk = 20;
     const bool use_maps = ensure_scale_maps(dst_w, dst_h, logical_w, logical_h);
 
