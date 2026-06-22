@@ -37,29 +37,16 @@
 #include "doom_port.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
+#include "bsp/esp-bsp.h"
 
 static const char *TAG = "jc4880p443";
 static const char *NET_TAG = "wifi_portal";
 
-#define LCD_H_RES 480
-#define LCD_V_RES 800
-
-#define LCD_HSYNC 12
-#define LCD_HBP 42
-#define LCD_HFP 42
-#define LCD_VSYNC 2
-#define LCD_VBP 8
-#define LCD_VFP 166
-
-#define LCD_DPI_CLK_MHZ 34
-#define LCD_DSI_LANE_NUM 2
-#define LCD_DSI_LANE_BITRATE_MBPS 500
-
-#define LCD_RST_GPIO GPIO_NUM_5
-#define LCD_BACKLIGHT_GPIO GPIO_NUM_23
-
-#define MIPI_DSI_PHY_LDO_CHAN 3
-#define MIPI_DSI_PHY_LDO_MV 2500
+/*
+ * Display bring-up (MIPI-DSI bus, D-PHY LDO, EK79007 1024x600 panel, reset and
+ * PWM backlight) is delegated to the esp32_p4_function_ev_board BSP, the same one
+ * the Brookesia demo uses on this board. See app_main().
+ */
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
@@ -81,156 +68,39 @@ static bool s_wifi_started;
 static bool s_sta_netif_started;
 static bool s_ap_netif_started;
 
-typedef struct {
-    uint8_t cmd;
-    const uint8_t *data;
-    uint8_t data_len;
-    uint16_t delay_ms;
-} lcd_init_cmd_t;
-
-#define CMD(_cmd, ...)                                      \
-    {                                                       \
-        .cmd = (_cmd),                                      \
-        .data = (const uint8_t[]){__VA_ARGS__},             \
-        .data_len = sizeof((const uint8_t[]){__VA_ARGS__}), \
-        .delay_ms = 0,                                      \
-    }
-
-#define CMD_DELAY(_cmd, _delay_ms, ...)                     \
-    {                                                       \
-        .cmd = (_cmd),                                      \
-        .data = (const uint8_t[]){__VA_ARGS__},             \
-        .data_len = sizeof((const uint8_t[]){__VA_ARGS__}), \
-        .delay_ms = (_delay_ms),                            \
-    }
-
-static const lcd_init_cmd_t jc4880p443_init_cmds[] = {
-    CMD(0xFF, 0x77, 0x01, 0x00, 0x00, 0x13),
-    CMD(0xEF, 0x08),
-    CMD(0xFF, 0x77, 0x01, 0x00, 0x00, 0x10),
-    CMD(0xC0, 0x63, 0x00),
-    CMD(0xC1, 0x0D, 0x02),
-    CMD(0xC2, 0x10, 0x08),
-    CMD(0xCC, 0x10),
-    CMD(0xB0, 0x80, 0x09, 0x53, 0x0C, 0xD0, 0x07, 0x0C, 0x09, 0x09, 0x28, 0x06, 0xD4, 0x13, 0x69, 0x2B, 0x71),
-    CMD(0xB1, 0x80, 0x94, 0x5A, 0x10, 0xD3, 0x06, 0x0A, 0x08, 0x08, 0x25, 0x03, 0xD3, 0x12, 0x66, 0x6A, 0x0D),
-    CMD(0xFF, 0x77, 0x01, 0x00, 0x00, 0x11),
-    CMD(0xB0, 0x5D),
-    CMD(0xB1, 0x58),
-    CMD(0xB2, 0x87),
-    CMD(0xB3, 0x80),
-    CMD(0xB5, 0x4E),
-    CMD(0xB7, 0x85),
-    CMD(0xB8, 0x21),
-    CMD(0xB9, 0x10, 0x1F),
-    CMD(0xBB, 0x03),
-    CMD(0xBC, 0x00),
-    CMD(0xC1, 0x78),
-    CMD(0xC2, 0x78),
-    CMD(0xD0, 0x88),
-    CMD(0xE0, 0x00, 0x3A, 0x02),
-    CMD(0xE1, 0x04, 0xA0, 0x00, 0xA0, 0x05, 0xA0, 0x00, 0xA0, 0x00, 0x40, 0x40),
-    CMD(0xE2, 0x30, 0x00, 0x40, 0x40, 0x32, 0xA0, 0x00, 0xA0, 0x00, 0xA0, 0x00, 0xA0, 0x00),
-    CMD(0xE3, 0x00, 0x00, 0x33, 0x33),
-    CMD(0xE4, 0x44, 0x44),
-    CMD(0xE5, 0x09, 0x2E, 0xA0, 0xA0, 0x0B, 0x30, 0xA0, 0xA0, 0x05, 0x2A, 0xA0, 0xA0, 0x07, 0x2C, 0xA0, 0xA0),
-    CMD(0xE6, 0x00, 0x00, 0x33, 0x33),
-    CMD(0xE7, 0x44, 0x44),
-    CMD(0xE8, 0x08, 0x2D, 0xA0, 0xA0, 0x0A, 0x2F, 0xA0, 0xA0, 0x04, 0x29, 0xA0, 0xA0, 0x06, 0x2B, 0xA0, 0xA0),
-    CMD(0xEB, 0x00, 0x00, 0x4E, 0x4E, 0x00, 0x00, 0x00),
-    CMD(0xEC, 0x08, 0x01),
-    CMD(0xED, 0xB0, 0x2B, 0x98, 0xA4, 0x56, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xF7, 0x65, 0x4A, 0x89, 0xB2, 0x0B),
-    CMD(0xEF, 0x08, 0x08, 0x08, 0x45, 0x3F, 0x54),
-    CMD(0xFF, 0x77, 0x01, 0x00, 0x00, 0x00),
-    CMD(0x3A, 0x55),       // RGB565 pixel format.
-    CMD(0x36, 0x00),       // RGB order, no mirroring.
-    CMD(0x20),             // Inversion off.
-    CMD_DELAY(0x11, 120),  // Sleep out.
-    CMD_DELAY(0x29, 20),   // Display on.
-};
-
 static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
 }
 
-static void reset_lcd(void)
-{
-    gpio_config_t reset_config = {
-        .pin_bit_mask = BIT64(LCD_RST_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    ESP_ERROR_CHECK(gpio_config(&reset_config));
-
-    gpio_set_level(LCD_RST_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    gpio_set_level(LCD_RST_GPIO, 0);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    gpio_set_level(LCD_RST_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(120));
-}
-
-static void enable_backlight(void)
-{
-    gpio_config_t backlight_config = {
-        .pin_bit_mask = BIT64(LCD_BACKLIGHT_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    ESP_ERROR_CHECK(gpio_config(&backlight_config));
-    gpio_set_level(LCD_BACKLIGHT_GPIO, 1);
-    ESP_LOGI(TAG, "Backlight enabled on GPIO%d", LCD_BACKLIGHT_GPIO);
-}
-
-static void enable_mipi_dphy_power(void)
-{
-    esp_ldo_channel_config_t ldo_config = {
-        .chan_id = MIPI_DSI_PHY_LDO_CHAN,
-        .voltage_mv = MIPI_DSI_PHY_LDO_MV,
-    };
-    esp_ldo_channel_handle_t ldo = NULL;
-    ESP_ERROR_CHECK(esp_ldo_acquire_channel(&ldo_config, &ldo));
-    ESP_LOGI(TAG, "MIPI D-PHY LDO%d enabled at %dmV", MIPI_DSI_PHY_LDO_CHAN, MIPI_DSI_PHY_LDO_MV);
-}
-
-static void send_panel_init_sequence(esp_lcd_panel_io_handle_t io)
-{
-    for (size_t i = 0; i < sizeof(jc4880p443_init_cmds) / sizeof(jc4880p443_init_cmds[0]); i++) {
-        const lcd_init_cmd_t *cmd = &jc4880p443_init_cmds[i];
-        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io, cmd->cmd, cmd->data, cmd->data_len));
-        if (cmd->delay_ms > 0) {
-            vTaskDelay(pdMS_TO_TICKS(cmd->delay_ms));
-        }
-    }
-}
-
 static void draw_test_pattern(esp_lcd_panel_handle_t panel)
 {
     const int stripe_lines = 40;
-    uint16_t *stripe = heap_caps_malloc(LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint16_t *stripe = heap_caps_malloc(BSP_LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stripe == NULL) {
-        stripe = heap_caps_malloc(LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        stripe = heap_caps_malloc(BSP_LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     ESP_ERROR_CHECK(stripe == NULL ? ESP_ERR_NO_MEM : ESP_OK);
 
-    for (int y0 = 0; y0 < LCD_V_RES; y0 += stripe_lines) {
-        int lines = (LCD_V_RES - y0) < stripe_lines ? (LCD_V_RES - y0) : stripe_lines;
+    for (int y0 = 0; y0 < BSP_LCD_V_RES; y0 += stripe_lines) {
+        int lines = (BSP_LCD_V_RES - y0) < stripe_lines ? (BSP_LCD_V_RES - y0) : stripe_lines;
         for (int y = 0; y < lines; y++) {
             int screen_y = y0 + y;
-            for (int x = 0; x < LCD_H_RES; x++) {
-                uint8_t r = (uint8_t)((x * 255) / (LCD_H_RES - 1));
-                uint8_t g = (uint8_t)((screen_y * 255) / (LCD_V_RES - 1));
+            for (int x = 0; x < BSP_LCD_H_RES; x++) {
+                uint8_t r = (uint8_t)((x * 255) / (BSP_LCD_H_RES - 1));
+                uint8_t g = (uint8_t)((screen_y * 255) / (BSP_LCD_V_RES - 1));
                 uint8_t b = (uint8_t)(((x / 40) ^ (screen_y / 40)) & 1 ? 255 : 32);
 
                 if (screen_y < 80) {
                     r = 255;
-                    g = (x < LCD_H_RES / 2) ? 255 : 80;
+                    g = (x < BSP_LCD_H_RES / 2) ? 255 : 80;
                     b = 0;
                 }
 
-                stripe[y * LCD_H_RES + x] = rgb565(r, g, b);
+                stripe[y * BSP_LCD_H_RES + x] = rgb565(r, g, b);
             }
         }
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y0, LCD_H_RES, y0 + lines, stripe));
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y0, BSP_LCD_H_RES, y0 + lines, stripe));
     }
 
     free(stripe);
@@ -496,12 +366,11 @@ static esp_err_t portal_save_post_handler(httpd_req_t *req)
 static const char *rotation_name(panel_rotation_t rotation)
 {
     switch (rotation) {
-    case PANEL_ROTATION_90_CW:
-        return "Default";
-    case PANEL_ROTATION_270_CW:
+    case PANEL_ROTATION_180:
         return "Flipped";
     case PANEL_ROTATION_0:
-    case PANEL_ROTATION_180:
+    case PANEL_ROTATION_90_CW:
+    case PANEL_ROTATION_270_CW:
     default:
         return "Default";
     }
@@ -564,8 +433,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
                        "<h2>Doom P4 Settings&nbsp;&nbsp;.&nbsp;&nbsp;2026</h2>"
                        "<div class=\"panel\"><form action=\"/settings/save\" method=\"post\">"
                        "<div class=\"row\"><label>Rotation</label><select name=\"rotation\">"
-                       "<option value=\"1\"%s>Default</option>"
-                       "<option value=\"3\"%s>Flipped</option></select></div>"
+                       "<option value=\"0\"%s>Default</option>"
+                       "<option value=\"2\"%s>Flipped</option></select></div>"
                        "<div class=\"row\"><label>Swap red/blue</label><input type=\"checkbox\" name=\"swap_rb\" value=\"1\" %s></div>"
                        "<div class=\"row\"><label>Invert colors</label><input type=\"checkbox\" name=\"invert\" value=\"1\" %s></div>"
                        "<div class=\"row\"><label>Show FPS</label><input type=\"checkbox\" name=\"show_fps\" value=\"1\" %s></div>"
@@ -582,8 +451,8 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
                        "+'dpad: '+j.dpad+'\\nlx/ly: '+j.lx+'/'+j.ly+'\\nrx/ry: '+j.rx+'/'+j.ry+'\\nl2/r2: '+j.l2+'/'+j.r2;}"
                        "catch(e){pad.textContent='controller API unavailable';}}setInterval(tick,1000);tick();</script>"
                        "</body></html>",
-                       settings.rotation == PANEL_ROTATION_90_CW ? " selected" : "",
-                       settings.rotation == PANEL_ROTATION_270_CW ? " selected" : "",
+                       settings.rotation == PANEL_ROTATION_0 ? " selected" : "",
+                       settings.rotation == PANEL_ROTATION_180 ? " selected" : "",
                        settings.swap_red_blue ? "checked" : "",
                        settings.invert_colors ? "checked" : "",
                        settings.show_fps ? "checked" : "",
@@ -667,8 +536,8 @@ static esp_err_t settings_save_post_handler(httpd_req_t *req)
     panel_display_settings_t old_settings = settings;
     uint8_t old_audio_volume = doom_audio_get_volume();
     settings.rotation = (panel_rotation_t)form_get_u8(body, "rotation", (uint8_t)settings.rotation);
-    if (settings.rotation != PANEL_ROTATION_270_CW) {
-        settings.rotation = PANEL_ROTATION_90_CW;
+    if (settings.rotation != PANEL_ROTATION_180) {
+        settings.rotation = PANEL_ROTATION_0;
     }
     settings.swap_red_blue = form_has_key(body, "swap_rb");
     settings.invert_colors = form_has_key(body, "invert");
@@ -765,6 +634,10 @@ static esp_err_t start_portal_servers(void)
     http_config.max_open_sockets = 7;
     http_config.max_uri_handlers = 12;
     http_config.lru_purge_enable = true;
+    /* The default 4 KB httpd task stack overflows: the portal/settings handlers
+     * build large pages with on-stack buffers (e.g. portal_send_page's char[1500])
+     * plus snprintf's own frames. Give it room. */
+    http_config.stack_size = 8192;
 
     esp_err_t err = httpd_start(&s_portal_server, &http_config);
     if (err != ESP_OK) {
@@ -1104,54 +977,29 @@ static void init_wifi_with_portal(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting Doom P4 on JC4880P443");
-    enable_mipi_dphy_power();
+    ESP_LOGI(TAG, "Starting Doom P4 on Scintix P4 (EK79007 %dx%d)", BSP_LCD_H_RES, BSP_LCD_V_RES);
 
-    esp_lcd_dsi_bus_handle_t dsi_bus = NULL;
-    esp_lcd_dsi_bus_config_t bus_config = {
-        .bus_id = 0,
-        .num_data_lanes = LCD_DSI_LANE_NUM,
-        .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,
-        .lane_bit_rate_mbps = LCD_DSI_LANE_BITRATE_MBPS,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &dsi_bus));
-
-    esp_lcd_panel_io_handle_t dbi_io = NULL;
-    esp_lcd_dbi_io_config_t dbi_config = {
-        .virtual_channel = 0,
-        .lcd_cmd_bits = 8,
-        .lcd_param_bits = 8,
-    };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(dsi_bus, &dbi_config, &dbi_io));
-
-    esp_lcd_panel_handle_t dpi_panel = NULL;
-    esp_lcd_dpi_panel_config_t dpi_config = {
-        .virtual_channel = 0,
-        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-        .dpi_clock_freq_mhz = LCD_DPI_CLK_MHZ,
-        .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
-        .in_color_format = LCD_COLOR_FMT_RGB565,
-        .out_color_format = LCD_COLOR_FMT_RGB565,
-        .num_fbs = 1,
-        .video_timing = {
-            .h_size = LCD_H_RES,
-            .v_size = LCD_V_RES,
-            .hsync_pulse_width = LCD_HSYNC,
-            .hsync_back_porch = LCD_HBP,
-            .hsync_front_porch = LCD_HFP,
-            .vsync_pulse_width = LCD_VSYNC,
-            .vsync_back_porch = LCD_VBP,
-            .vsync_front_porch = LCD_VFP,
+    /* The BSP handles the D-PHY LDO, the MIPI-DSI bus, the EK79007 panel reset/init
+     * and the PWM backlight (brightness starts at 0). This mirrors the proven
+     * Brookesia bring-up for this board. */
+    /* Leave phy_clk_src zero-initialized, exactly like the Brookesia demo. The
+     * MIPI_DSI_PHY_CLK_SRC_DEFAULT macro maps to the legacy PLL_F20M source, which
+     * is invalid on ESP32-P4 chips rev >= 3.0 (this board is rev v3.1) and aborts
+     * in the DSI PHY HAL. Zero lets the driver pick a valid default (XTAL). */
+    bsp_display_config_t disp_cfg = {
+        .hdmi_resolution = BSP_HDMI_RES_NONE,
+        .dsi_bus = {
+            .lane_bit_rate_mbps = BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS,
         },
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_dpi(dsi_bus, &dpi_config, &dpi_panel));
-    panel_display_set_panel(dpi_panel);
+    esp_lcd_panel_handle_t lcd_panel = NULL;
+    esp_lcd_panel_io_handle_t lcd_panel_io = NULL;
+    ESP_ERROR_CHECK(bsp_display_new(&disp_cfg, &lcd_panel, &lcd_panel_io));
+    (void)lcd_panel_io; /* Doom draws straight to the panel; the command IO isn't needed here. */
+    panel_display_set_panel(lcd_panel);
 
-    reset_lcd();
-    ESP_ERROR_CHECK(esp_lcd_panel_init(dpi_panel));
-    send_panel_init_sequence(dbi_io);
-    draw_test_pattern(dpi_panel);
-    enable_backlight();
+    draw_test_pattern(lcd_panel);
+    ESP_ERROR_CHECK(bsp_display_backlight_on());
 
     ESP_LOGI(TAG, "Doom P4 bringup complete");
     init_wifi_with_portal();

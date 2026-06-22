@@ -5,9 +5,11 @@
 
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
+#include "bsp/display.h"
 
-#define PANEL_DISPLAY_WIDTH 480
-#define PANEL_DISPLAY_HEIGHT 800
+/* Match the active BSP panel (EK79007 = 1024x600 landscape on the Scintix P4). */
+#define PANEL_DISPLAY_WIDTH BSP_LCD_H_RES
+#define PANEL_DISPLAY_HEIGHT BSP_LCD_V_RES
 
 typedef enum {
     PANEL_ROTATION_0 = 0,

@@ -3,10 +3,18 @@ CONFIG_IDF_TARGET_ESP32P4=y
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_HEX=y
-CONFIG_SPIRAM_SPEED_200M=y
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_SPIRAM_SPEED_250M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y
+# Build for speed (-O2). The default was -Og (debug), which is much slower for
+# the Doom render/scaling loop. Matches the Brookesia demo.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# Finer scheduler tick (matches Brookesia); Doom timing itself uses esp_timer.
+CONFIG_FREERTOS_HZ=1000
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# QIO doubles instruction-fetch bandwidth vs the default DIO. Proven on this board
+# (the Brookesia demo uses QIO). Helps the code-fetch-bound Doom renderer.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
@@ -36,3 +44,10 @@ CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCP_SACK_OUT=y
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
+# Display: esp32_p4_function_ev_board BSP driving the EK79007 1024x600 MIPI-DSI
+# panel (same as the working Brookesia demo on this board). Touch/camera are
+# unused by Doom; the GT911/esp_video deps are linked but never initialized.
+CONFIG_BSP_LCD_TYPE_1024_600=y
+CONFIG_BSP_LCD_COLOR_FORMAT_RGB565=y
+CONFIG_BSP_I2C_NUM=0
+CONFIG_BSP_LCD_DPI_BUFFER_NUMS=1

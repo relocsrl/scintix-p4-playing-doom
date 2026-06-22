@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_memory_utils.h"
 #include "esp_timer.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -27,8 +29,18 @@ static portMUX_TYPE s_settings_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint16_t *s_doom_lines[DOOM_LINE_BUFFERS];
 static size_t s_doom_lines_pixels;
 static size_t s_doom_line_index;
+
+/* Nearest-neighbour scaling maps: s_scale_lx[x] / s_scale_ly[y] give the source
+ * (logical) coordinate for each destination column/row, so the hot loop avoids a
+ * per-pixel integer divide. Rebuilt only when the geometry changes. */
+static uint16_t *s_scale_lx;
+static uint16_t *s_scale_ly;
+static int s_scale_logical_w;
+static int s_scale_logical_h;
+static int s_scale_dst_w;
+static int s_scale_dst_h;
 static panel_display_settings_t s_settings = {
-    .rotation = PANEL_ROTATION_90_CW,
+    .rotation = PANEL_ROTATION_0,
     .swap_red_blue = false,
     .invert_colors = false,
     .show_fps = false,
@@ -50,8 +62,8 @@ static uint8_t clamp_gain(uint8_t gain)
 
 static void sanitize_settings(panel_display_settings_t *settings)
 {
-    if (settings->rotation != PANEL_ROTATION_90_CW && settings->rotation != PANEL_ROTATION_270_CW) {
-        settings->rotation = PANEL_ROTATION_90_CW;
+    if (settings->rotation != PANEL_ROTATION_0 && settings->rotation != PANEL_ROTATION_180) {
+        settings->rotation = PANEL_ROTATION_0;
     }
     settings->red_gain = clamp_gain(settings->red_gain);
     settings->green_gain = clamp_gain(settings->green_gain);
@@ -389,6 +401,42 @@ esp_err_t panel_display_fill(uint16_t rgb565)
     return ESP_OK;
 }
 
+/* (Re)build the nearest-neighbour scaling maps. Returns false on allocation
+ * failure, in which case the caller falls back to the per-pixel divide path. */
+static bool ensure_scale_maps(int dst_w, int dst_h, int logical_w, int logical_h)
+{
+    if (s_scale_lx != NULL && s_scale_ly != NULL &&
+        s_scale_dst_w == dst_w && s_scale_dst_h == dst_h &&
+        s_scale_logical_w == logical_w && s_scale_logical_h == logical_h) {
+        return true;
+    }
+
+    free(s_scale_lx);
+    free(s_scale_ly);
+    s_scale_lx = heap_caps_malloc((size_t)dst_w * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_scale_ly = heap_caps_malloc((size_t)dst_h * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (s_scale_lx == NULL || s_scale_ly == NULL) {
+        free(s_scale_lx);
+        free(s_scale_ly);
+        s_scale_lx = NULL;
+        s_scale_ly = NULL;
+        s_scale_dst_w = 0;
+        return false;
+    }
+
+    for (int x = 0; x < dst_w; x++) {
+        s_scale_lx[x] = (uint16_t)(((int)x * logical_w) / dst_w);
+    }
+    for (int y = 0; y < dst_h; y++) {
+        s_scale_ly[y] = (uint16_t)(((int)y * logical_h) / dst_h);
+    }
+    s_scale_dst_w = dst_w;
+    s_scale_dst_h = dst_h;
+    s_scale_logical_w = logical_w;
+    s_scale_logical_h = logical_h;
+    return true;
+}
+
 esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src_h)
 {
     if (s_panel == NULL || src == NULL || src_w <= 0 || src_h <= 0) {
@@ -416,6 +464,7 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
     }
     const int dst_y0 = (dst_screen_h - dst_h) / 2;
     const int lines_per_chunk = 20;
+    const bool use_maps = ensure_scale_maps(dst_w, dst_h, logical_w, logical_h);
 
     const size_t line_pixels = (size_t)dst_w * lines_per_chunk;
     if (s_doom_lines_pixels < line_pixels) {
@@ -440,12 +489,20 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
             }
         }
         s_doom_lines_pixels = line_pixels;
+        ESP_LOGI("panel_perf", "line buffers (%u KB) in %s RAM",
+                 (unsigned)(DOOM_LINE_BUFFERS * line_pixels * sizeof(uint16_t) / 1024),
+                 esp_ptr_internal(s_doom_lines[0]) ? "INTERNAL" : "PSRAM");
     }
 
     if (s_panel_lock != NULL) {
         xSemaphoreTake(s_panel_lock, portMAX_DELAY);
     }
     const bool adjust_color = !color_settings_are_neutral(&settings);
+    const panel_rotation_t rot = settings.rotation;
+    const bool swap_axes = (rot == PANEL_ROTATION_90_CW || rot == PANEL_ROTATION_270_CW);
+    const bool flip180 = (rot == PANEL_ROTATION_180);
+    const int64_t scale_t0 = esp_timer_get_time(); /* PERF: scale+blit timing */
+    int64_t blit_us = 0;                            /* PERF: draw_bitmap-only time */
     for (int screen_y0 = 0; screen_y0 < dst_screen_h; screen_y0 += lines_per_chunk) {
         uint16_t *lines = s_doom_lines[s_doom_line_index++ % DOOM_LINE_BUFFERS];
         int h = dst_screen_h - screen_y0;
@@ -453,37 +510,70 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
             h = lines_per_chunk;
         }
 
+        int prev_ly = -1; /* last gathered source row, for vertical row dedup */
         for (int y = 0; y < h; y++) {
             int screen_y = screen_y0 + y;
             int doom_y = screen_y - dst_y0;
+            uint16_t *dline = lines + y * dst_w;
             if (doom_y < 0 || doom_y >= dst_h) {
-                memset(lines + y * dst_w, 0, dst_w * sizeof(uint16_t));
+                memset(dline, 0, dst_w * sizeof(uint16_t));
+                prev_ly = -1;
                 continue;
             }
 
-            for (int x = 0; x < dst_w; x++) {
-                int logical_x = (x * logical_w) / dst_w;
-                int logical_y = (doom_y * logical_h) / dst_h;
-                int src_x = logical_x;
-                int src_y = logical_y;
-
-                switch (settings.rotation) {
-                case PANEL_ROTATION_90_CW:
-                    src_x = logical_y;
-                    src_y = src_h - 1 - logical_x;
-                    break;
-                case PANEL_ROTATION_270_CW:
-                    src_x = src_w - 1 - logical_y;
-                    src_y = logical_x;
-                    break;
-                case PANEL_ROTATION_0:
-                case PANEL_ROTATION_180:
-                default:
-                    break;
+            if (!use_maps) {
+                /* Fallback path: per-pixel divide. Only taken if the (tiny) scale
+                 * LUTs failed to allocate. */
+                prev_ly = -1;
+                for (int x = 0; x < dst_w; x++) {
+                    int logical_x = (x * logical_w) / dst_w;
+                    int logical_y = (doom_y * logical_h) / dst_h;
+                    int src_x = logical_x;
+                    int src_y = logical_y;
+                    switch (rot) {
+                    case PANEL_ROTATION_90_CW:  src_x = logical_y; src_y = src_h - 1 - logical_x; break;
+                    case PANEL_ROTATION_270_CW: src_x = src_w - 1 - logical_y; src_y = logical_x; break;
+                    case PANEL_ROTATION_180:    src_x = src_w - 1 - logical_x; src_y = src_h - 1 - logical_y; break;
+                    default: break;
+                    }
+                    uint16_t color = src[src_y * src_w + src_x];
+                    dline[x] = adjust_color ? apply_color_settings(color, &settings) : color;
                 }
+                continue;
+            }
 
-                uint16_t color = src[src_y * src_w + src_x];
-                lines[y * dst_w + x] = adjust_color ? apply_color_settings(color, &settings) : color;
+            const int ly_val = s_scale_ly[doom_y];
+            if (ly_val == prev_ly) {
+                /* Same source row as the line just above: nearest-neighbour gives an
+                 * identical output row, so copy it instead of re-gathering. */
+                memcpy(dline, dline - dst_w, dst_w * sizeof(uint16_t));
+                continue;
+            }
+            prev_ly = ly_val;
+            if (!swap_axes) {
+                const int src_y = flip180 ? (src_h - 1 - ly_val) : ly_val;
+                const uint16_t *srow = src + (size_t)src_y * src_w;
+                if (!adjust_color && !flip180) {
+                    /* Hot path (rotation 0, neutral colours): a plain gather, no
+                     * divide and no branch. */
+                    for (int x = 0; x < dst_w; x++) {
+                        dline[x] = srow[s_scale_lx[x]];
+                    }
+                } else {
+                    for (int x = 0; x < dst_w; x++) {
+                        int src_x = flip180 ? (src_w - 1 - s_scale_lx[x]) : s_scale_lx[x];
+                        uint16_t color = srow[src_x];
+                        dline[x] = adjust_color ? apply_color_settings(color, &settings) : color;
+                    }
+                }
+            } else {
+                const int sxc = (rot == PANEL_ROTATION_90_CW) ? ly_val : (src_w - 1 - ly_val);
+                for (int x = 0; x < dst_w; x++) {
+                    int lxv = s_scale_lx[x];
+                    int src_y = (rot == PANEL_ROTATION_90_CW) ? (src_h - 1 - lxv) : lxv;
+                    uint16_t color = src[(size_t)src_y * src_w + sxc];
+                    dline[x] = adjust_color ? apply_color_settings(color, &settings) : color;
+                }
             }
         }
 
@@ -491,7 +581,9 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
             draw_fps_overlay(lines, screen_y0, h, dst_w, s_fps_value_x10);
         }
 
+        const int64_t blit_t0 = esp_timer_get_time();
         esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, screen_y0, dst_w, screen_y0 + h, lines);
+        blit_us += esp_timer_get_time() - blit_t0;
         if (err != ESP_OK) {
             if (s_panel_lock != NULL) {
                 xSemaphoreGive(s_panel_lock);
@@ -501,6 +593,23 @@ esp_err_t panel_display_draw_doom_rgb565(const uint16_t *src, int src_w, int src
     }
     if (s_panel_lock != NULL) {
         xSemaphoreGive(s_panel_lock);
+    }
+
+    /* PERF: average scale+blit time. Compare against the on-screen FPS (total
+     * frame time = 1000/FPS ms) to see how much is Doom's own rendering. */
+    static int64_t s_scale_us_accum;
+    static int64_t s_blit_us_accum;
+    static uint32_t s_scale_us_frames;
+    s_scale_us_accum += esp_timer_get_time() - scale_t0;
+    s_blit_us_accum += blit_us;
+    if (++s_scale_us_frames >= 64) {
+        int64_t total = s_scale_us_accum / s_scale_us_frames;
+        int64_t blit = s_blit_us_accum / s_scale_us_frames;
+        ESP_LOGI("panel_perf", "total %lld us/frame = scale %lld + blit %lld",
+                 (long long)total, (long long)(total - blit), (long long)blit);
+        s_scale_us_accum = 0;
+        s_blit_us_accum = 0;
+        s_scale_us_frames = 0;
     }
 
     return ESP_OK;
