@@ -1,14 +1,14 @@
-# DOOM on the Scintix P4 (ESP32-P4 + ESP32-C6)
+# DOOM on the SCINTIX P4 (ESP32-P4 + ESP32-C6)
 
-A port of DOOM running on the **Scintix P4**, our custom board based on the
+A port of DOOM running on the **SCINTIX P4**, our custom board based on the
 **ESP32-P4** with an **ESP32-C6** wireless co-processor.
 
 > **This is a fork.** It started from the excellent ESP32-P4 DOOM port by
 > **Mazur888** — [mazur888/DOOM-working-on-ESP32-P4-C6](https://github.com/mazur888/DOOM-working-on-ESP32-P4-C6),
 > which targets the Guition **JC4880P443** panel (ST7701S, 480×800). This fork
-> adapts that work to the **Scintix P4** hardware, whose display and wiring differ.
+> adapts that work to the **SCINTIX P4** hardware, whose display and wiring differ.
 
-## Target hardware (Scintix P4)
+## Target hardware (SCINTIX P4)
 
 - **MCU**: ESP32-P4 (rev. v3.1), 32 MB hex PSRAM, 32 MB flash.
 - **Wireless co-processor**: ESP32-C6 over SDIO (4-bit), Wi-Fi provided to the P4
@@ -73,7 +73,7 @@ first flash takes a while.
 ## Wi-Fi portal
 
 - On first boot the device starts an **open Access Point** (SSID
-  `Scintix-P4-XXXXXX`, where the suffix is derived from the MAC) and a captive portal.
+  `SCINTIX-P4-XXXXXX`, where the suffix is derived from the MAC) and a captive portal.
 - Connect, enter your Wi-Fi SSID and password, and save.
 - Use the serial monitor or a network scanner to find the device IP, then open it
   in a browser for the settings page.
@@ -83,6 +83,6 @@ first flash takes a while.
 This project is released under the [GNU GPL v3.0](LICENSE).
 
 - Original work © 2026 **Mazur888**.
-- Scintix P4 adaptations © 2026 **RELOC s.r.l.**.
+- SCINTIX P4 adaptations © 2026 **RELOC s.r.l.**.
 
 No warranty; use at your own risk.

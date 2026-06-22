@@ -1,5 +1,5 @@
 /*
- * Doom for the Scintix P4 (ESP32-P4 + ESP32-C6, EK79007 1024x600 panel).
+ * Doom for the SCINTIX P4 (ESP32-P4 + ESP32-C6, EK79007 1024x600 panel).
  *
  * Ported from the JC4880P443 version by mazur888 (2026).
  *
@@ -232,7 +232,7 @@ static void get_portal_ssid(char *ssid, size_t ssid_len)
 {
     uint8_t mac[6] = {};
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_BASE));
-    snprintf(ssid, ssid_len, "Scintix-P4-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    snprintf(ssid, ssid_len, "SCINTIX-P4-%02X%02X%02X", mac[3], mac[4], mac[5]);
 }
 
 static void portal_send_page(httpd_req_t *req, const char *status)
@@ -243,11 +243,11 @@ static void portal_send_page(httpd_req_t *req, const char *status)
     char page[1500];
     int len = snprintf(page, sizeof(page),
                        "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                       "<title>Scintix P4 Wi-Fi</title>"
+                       "<title>SCINTIX P4 Wi-Fi</title>"
                        "<style>body{font-family:sans-serif;margin:2rem;max-width:34rem}"
                        "input,button{box-sizing:border-box;font-size:1rem;margin:.35rem 0;padding:.7rem;width:100%%}"
                        "button{font-weight:700}</style></head><body>"
-                       "<h2>Scintix P4 Wi-Fi</h2><p>%s</p>"
+                       "<h2>SCINTIX P4 Wi-Fi</h2><p>%s</p>"
                        "<form action=\"/save\" method=\"post\">"
                        "<label>SSID</label><input name=\"ssid\" maxlength=\"32\" autocomplete=\"off\" value=\"%s\" autofocus>"
                        "<label>Password</label><input name=\"password\" maxlength=\"64\" type=\"password\">"
@@ -977,7 +977,7 @@ static void init_wifi_with_portal(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting Doom P4 on Scintix P4 (EK79007 %dx%d)", BSP_LCD_H_RES, BSP_LCD_V_RES);
+    ESP_LOGI(TAG, "Starting Doom P4 on SCINTIX P4 (EK79007 %dx%d)", BSP_LCD_H_RES, BSP_LCD_V_RES);
 
     /* The BSP handles the D-PHY LDO, the MIPI-DSI bus, the EK79007 panel reset/init
      * and the PWM backlight (brightness starts at 0). This mirrors the proven

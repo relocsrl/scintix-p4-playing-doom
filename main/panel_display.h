@@ -7,7 +7,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "bsp/display.h"
 
-/* Match the active BSP panel (EK79007 = 1024x600 landscape on the Scintix P4). */
+/* Match the active BSP panel (EK79007 = 1024x600 landscape on the SCINTIX P4). */
 #define PANEL_DISPLAY_WIDTH BSP_LCD_H_RES
 #define PANEL_DISPLAY_HEIGHT BSP_LCD_V_RES
 
