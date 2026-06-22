@@ -212,18 +212,20 @@ static bool wad_exists(void)
     return true;
 }
 
-/* Printed raw (not through ESP_LOG) so the figlet "Doom" font stays aligned in
- * the serial console, with no per-line timestamp/tag prefix mangling it. */
+/* Printed raw (not through ESP_LOG) so the block-art stays aligned in the serial
+ * console, with no per-line timestamp/tag prefix mangling it. The figlet "ANSI
+ * Shadow" font uses Unicode box-drawing glyphs (UTF-8) — fine for `idf.py
+ * monitor` and most terminals. */
 static void print_doom_banner(void)
 {
     printf("\n"
-           "______  _____  _____ ___  ___ \n"
-           "|  _  \\|  _  ||  _  ||  \\/  |\n"
-           "| | | || | | || | | || .  . |\n"
-           "| | | || | | || | | || |\\/| |\n"
-           "| |/ / \\ \\_/ /\\ \\_/ /| |  | |\n"
-           "|___/   \\___/  \\___/ \\_|  |_/ \n"
-           "      SCINTIX P4  -  rip and tear!\n\n");
+           "    ██████╗  ██████╗  ██████╗ ███╗   ███╗\n"
+           "    ██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║\n"
+           "    ██║  ██║██║   ██║██║   ██║██╔████╔██║\n"
+           "    ██║  ██║██║   ██║██║   ██║██║╚██╔╝██║\n"
+           "    ██████╔╝╚██████╔╝╚██████╔╝██║ ╚═╝ ██║\n"
+           "    ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝     ╚═╝\n"
+           "         SCINTIX P4 — rip and tear!\n\n");
 }
 
 static void doom_task(void *arg)
