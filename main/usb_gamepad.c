@@ -66,6 +66,8 @@ static usb_gamepad_state_t s_public_state;
 static hid_host_device_handle_t s_active_gamepad_handle;
 static uint8_t s_active_gamepad_addr;
 static uint8_t s_active_gamepad_iface;
+static usb_keyboard_state_t s_keyboard_state;
+static hid_host_device_handle_t s_active_keyboard_handle;
 
 static bool is_ds4_device(uint16_t vid, uint16_t pid)
 {
@@ -282,11 +284,46 @@ static void mark_public_state_disconnected(hid_host_device_handle_t handle)
     taskEXIT_CRITICAL(&s_state_lock);
 }
 
+/* Store a boot-protocol keyboard report (data[0]=modifiers, data[1]=reserved,
+ * data[2..7]=up to 6 HID usage codes). */
+static void update_keyboard_state(hid_host_device_handle_t handle,
+                                  const uint8_t *data, size_t len)
+{
+    if (len < 3) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_state_lock);
+    s_active_keyboard_handle = handle;
+    s_keyboard_state.connected = true;
+    s_keyboard_state.modifiers = data[0];
+    for (int i = 0; i < 6; i++) {
+        s_keyboard_state.keys[i] = (len > (size_t)(2 + i)) ? data[2 + i] : 0;
+    }
+    s_keyboard_state.sequence++;
+    taskEXIT_CRITICAL(&s_state_lock);
+}
+
+static void mark_keyboard_disconnected(hid_host_device_handle_t handle)
+{
+    taskENTER_CRITICAL(&s_state_lock);
+    if (s_active_keyboard_handle == handle) {
+        s_active_keyboard_handle = NULL;
+        memset(&s_keyboard_state, 0, sizeof(s_keyboard_state));
+        s_keyboard_state.sequence++;
+    }
+    taskEXIT_CRITICAL(&s_state_lock);
+}
+
 static void hid_gamepad_report_callback(hid_host_device_handle_t handle,
                                         const hid_host_dev_params_t *dev_params,
                                         const uint8_t *data,
                                         size_t len)
 {
+    if (dev_params->proto == HID_PROTOCOL_KEYBOARD) {
+        update_keyboard_state(handle, data, len);
+        return;
+    }
+
     static ds4_state_t prev = {};
     static uint32_t raw_dumped = 0;
     ds4_state_t state = {};
@@ -351,6 +388,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
         ESP_LOGI(TAG, "HID device '%s' disconnected addr=%u iface=%u",
                  hid_proto_name(dev_params.proto), dev_params.addr, dev_params.iface_num);
         mark_public_state_disconnected(hid_device_handle);
+        mark_keyboard_disconnected(hid_device_handle);
         ESP_ERROR_CHECK_WITHOUT_ABORT(hid_host_device_close(hid_device_handle));
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -404,13 +442,14 @@ static void hid_host_device_event(hid_host_device_handle_t hid_device_handle,
             ESP_LOGI(TAG, "Ignoring DS4 non-gamepad HID interface %u", dev_params.iface_num);
             return;
         }
-    } else if (dev_params.proto != HID_PROTOCOL_NONE) {
-        ESP_LOGI(TAG, "Ignoring HID %s device vid=0x%04x pid=0x%04x",
-                 hid_proto_name(dev_params.proto), dev_info.VID, dev_info.PID);
+    } else if (dev_params.proto == HID_PROTOCOL_MOUSE) {
+        ESP_LOGI(TAG, "Ignoring HID mouse vid=0x%04x pid=0x%04x", dev_info.VID, dev_info.PID);
         return;
     } else {
-        ESP_LOGI(TAG, "Trying generic HID gamepad vid=0x%04x pid=0x%04x iface=%u",
-                 dev_info.VID, dev_info.PID, dev_params.iface_num);
+        /* Generic-protocol HID (gamepads, proto NONE) or a keyboard (proto
+         * KEYBOARD) — both are accepted; keyboards drive Doom as a fallback. */
+        ESP_LOGI(TAG, "Trying HID %s device vid=0x%04x pid=0x%04x iface=%u",
+                 hid_proto_name(dev_params.proto), dev_info.VID, dev_info.PID, dev_params.iface_num);
     }
 
     const hid_host_device_config_t dev_config = {
@@ -549,6 +588,18 @@ bool usb_gamepad_get_state(usb_gamepad_state_t *state)
 
     taskENTER_CRITICAL(&s_state_lock);
     *state = s_public_state;
+    taskEXIT_CRITICAL(&s_state_lock);
+    return true;
+}
+
+bool usb_keyboard_get_state(usb_keyboard_state_t *state)
+{
+    if (state == NULL) {
+        return false;
+    }
+
+    taskENTER_CRITICAL(&s_state_lock);
+    *state = s_keyboard_state;
     taskEXIT_CRITICAL(&s_state_lock);
     return true;
 }

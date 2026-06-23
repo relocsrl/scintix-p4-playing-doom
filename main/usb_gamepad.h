@@ -35,5 +35,15 @@ typedef struct {
     uint32_t sequence;
 } usb_gamepad_state_t;
 
+/* Boot-protocol keyboard snapshot: modifier byte + up to 6 simultaneously
+ * pressed HID usage codes (standard 8-byte boot report layout). */
+typedef struct {
+    bool connected;
+    uint8_t modifiers;
+    uint8_t keys[6];
+    uint32_t sequence;
+} usb_keyboard_state_t;
+
 esp_err_t usb_gamepad_start(void);
 bool usb_gamepad_get_state(usb_gamepad_state_t *state);
+bool usb_keyboard_get_state(usb_keyboard_state_t *state);

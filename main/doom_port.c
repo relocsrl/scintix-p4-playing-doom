@@ -32,6 +32,8 @@ static uint8_t s_key_head;
 static uint8_t s_key_tail;
 static uint32_t s_last_key_mask;
 static uint32_t s_last_gamepad_sequence;
+static uint32_t s_last_keyboard_sequence;
+static usb_keyboard_state_t s_kbd_prev;
 static bool s_spiffs_mounted;
 
 enum {
@@ -173,6 +175,113 @@ static void poll_gamepad_keys(void)
     }
 }
 
+/* Map a HID keyboard usage code to a Doom key. Modifier keys (Ctrl/Shift/Alt)
+ * are handled separately from the report's modifier byte. */
+static unsigned char kbd_usage_to_doom(uint8_t usage)
+{
+    switch (usage) {
+    case 0x52: return KEY_UPARROW;     /* Up    -> forward */
+    case 0x51: return KEY_DOWNARROW;   /* Down  -> back */
+    case 0x50: return KEY_LEFTARROW;   /* Left  -> turn left */
+    case 0x4F: return KEY_RIGHTARROW;  /* Right -> turn right */
+    case 0x2C: return KEY_USE;         /* Space -> use/open */
+    case 0x28: return KEY_ENTER;       /* Enter */
+    case 0x58: return KEY_ENTER;       /* Keypad Enter */
+    case 0x29: return KEY_ESCAPE;      /* Esc -> menu */
+    case 0x2B: return KEY_TAB;         /* Tab -> automap */
+    case 0x2A: return KEY_BACKSPACE;   /* Backspace */
+    case 0x36: return KEY_STRAFE_L;    /* , -> strafe left */
+    case 0x37: return KEY_STRAFE_R;    /* . -> strafe right */
+    default: break;
+    }
+    if (usage >= 0x1E && usage <= 0x26) {  /* 1..9 -> weapon select / menu */
+        return (unsigned char)('1' + (usage - 0x1E));
+    }
+    if (usage == 0x27) {                   /* 0 */
+        return '0';
+    }
+    if (usage >= 0x04 && usage <= 0x1D) {  /* a..z (y/n prompts, etc.) */
+        return (unsigned char)('a' + (usage - 0x04));
+    }
+    return 0;
+}
+
+/* Translate a USB keyboard into Doom key events: Ctrl=fire, Shift=run, Alt=strafe,
+ * arrows=move/turn, Space=use, ,/.=strafe, 1-7=weapons, Esc/Enter/Tab for menus. */
+static void poll_keyboard_keys(void)
+{
+    usb_keyboard_state_t state;
+    if (!usb_keyboard_get_state(&state)) {
+        return;
+    }
+    if (state.sequence == s_last_keyboard_sequence) {
+        return;
+    }
+    s_last_keyboard_sequence = state.sequence;
+
+    const uint8_t cur_mod = state.connected ? state.modifiers : 0;
+    static const struct {
+        uint8_t mask;
+        unsigned char key;
+    } mod_map[] = {
+        {0x11, KEY_FIRE},    /* Left/Right Ctrl  -> fire */
+        {0x22, KEY_RSHIFT},  /* Left/Right Shift -> run */
+        {0x44, KEY_RALT},    /* Left/Right Alt   -> strafe */
+    };
+    for (size_t i = 0; i < sizeof(mod_map) / sizeof(mod_map[0]); i++) {
+        bool now = (cur_mod & mod_map[i].mask) != 0;
+        bool was = (s_kbd_prev.modifiers & mod_map[i].mask) != 0;
+        if (now != was) {
+            queue_key_event(now, mod_map[i].key);
+        }
+    }
+
+    /* Press events for keys newly present, release for keys newly absent. */
+    for (int i = 0; i < 6; i++) {
+        uint8_t k = state.connected ? state.keys[i] : 0;
+        if (k < 0x04) {
+            continue;
+        }
+        bool was = false;
+        for (int j = 0; j < 6; j++) {
+            if (s_kbd_prev.keys[j] == k) {
+                was = true;
+                break;
+            }
+        }
+        if (!was) {
+            unsigned char dk = kbd_usage_to_doom(k);
+            if (dk != 0) {
+                queue_key_event(1, dk);
+            }
+        }
+    }
+    for (int j = 0; j < 6; j++) {
+        uint8_t k = s_kbd_prev.keys[j];
+        if (k < 0x04) {
+            continue;
+        }
+        bool still = false;
+        for (int i = 0; i < 6; i++) {
+            if ((state.connected ? state.keys[i] : 0) == k) {
+                still = true;
+                break;
+            }
+        }
+        if (!still) {
+            unsigned char dk = kbd_usage_to_doom(k);
+            if (dk != 0) {
+                queue_key_event(0, dk);
+            }
+        }
+    }
+
+    s_kbd_prev.modifiers = cur_mod;
+    for (int i = 0; i < 6; i++) {
+        s_kbd_prev.keys[i] = state.connected ? state.keys[i] : 0;
+    }
+}
+
 static esp_err_t mount_spiffs(void)
 {
     if (s_spiffs_mounted) {
@@ -291,6 +400,7 @@ int DG_GetKey(int *pressed, unsigned char *key)
     doom_key_event_t event;
 
     poll_gamepad_keys();
+    poll_keyboard_keys();
     if (!pop_key_event(&event)) {
         return 0;
     }
