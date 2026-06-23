@@ -20,6 +20,7 @@ static const char *TAG = "usb_gamepad";
 
 typedef enum {
     GAMEPAD_EVENT_HID = 0,
+    GAMEPAD_EVENT_IFACE_REARM,  /* re-arm an interrupt-IN that the driver halted on a transfer error */
 } gamepad_event_group_t;
 
 typedef struct {
@@ -59,6 +60,7 @@ enum {
 };
 
 static QueueHandle_t s_gamepad_event_queue;
+static uint32_t s_hid_rearm_attempts;  /* consecutive re-arms; reset when a report arrives */
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static usb_gamepad_state_t s_public_state;
 static hid_host_device_handle_t s_active_gamepad_handle;
@@ -340,6 +342,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
 
     switch (event) {
     case HID_HOST_INTERFACE_EVENT_INPUT_REPORT:
+        s_hid_rearm_attempts = 0; /* stream is healthy again */
         if (hid_host_device_get_raw_input_report_data(hid_device_handle, data, sizeof(data), &data_length) == ESP_OK) {
             hid_gamepad_report_callback(hid_device_handle, &dev_params, data, data_length);
         }
@@ -351,8 +354,19 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
         ESP_ERROR_CHECK_WITHOUT_ABORT(hid_host_device_close(hid_device_handle));
         break;
     case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
-        ESP_LOGW(TAG, "HID device '%s' transfer error addr=%u iface=%u",
+        /* The driver halts the IN endpoint after a transfer error and only
+         * re-submits on success, so one stray bus glitch (common during the busy
+         * boot) would kill input forever. Defer a re-arm to the gamepad task
+         * (stop+start can't run safely inside this transfer-done context). */
+        ESP_LOGW(TAG, "HID device '%s' transfer error addr=%u iface=%u; re-arming",
                  hid_proto_name(dev_params.proto), dev_params.addr, dev_params.iface_num);
+        if (s_gamepad_event_queue != NULL) {
+            const gamepad_event_t evt = {
+                .event_group = GAMEPAD_EVENT_IFACE_REARM,
+                .handle = hid_device_handle,
+            };
+            xQueueSend(s_gamepad_event_queue, &evt, 0);
+        }
         break;
     default:
         ESP_LOGW(TAG, "Unhandled HID interface event %d", event);
@@ -457,6 +471,26 @@ static void usb_lib_task(void *arg)
     }
 }
 
+/* Recover an interrupt-IN endpoint that the HID driver halted after a transfer
+ * error: stop (HALT+FLUSH+CLEAR the EP, state->READY) then start (re-submit).
+ * Runs in the gamepad task, not in the transfer-done callback context. Throttled
+ * and capped so a genuinely dead interface doesn't loop forever; the counter is
+ * reset in the INPUT_REPORT path once reports flow again. */
+static void rearm_hid_interface(hid_host_device_handle_t handle)
+{
+    if (s_hid_rearm_attempts >= 50) {
+        return; /* give up; likely the wrong interface or a dead link */
+    }
+    s_hid_rearm_attempts++;
+    vTaskDelay(pdMS_TO_TICKS(50));
+    hid_host_device_stop(handle);
+    esp_err_t err = hid_host_device_start(handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HID re-arm failed (attempt %u): %s",
+                 (unsigned)s_hid_rearm_attempts, esp_err_to_name(err));
+    }
+}
+
 static void usb_gamepad_task(void *arg)
 {
     (void)arg;
@@ -494,6 +528,8 @@ static void usb_gamepad_task(void *arg)
         if (xQueueReceive(s_gamepad_event_queue, &evt, portMAX_DELAY) == pdTRUE) {
             if (evt.event_group == GAMEPAD_EVENT_HID) {
                 hid_host_device_event(evt.handle, evt.event, evt.arg);
+            } else if (evt.event_group == GAMEPAD_EVENT_IFACE_REARM) {
+                rearm_hid_interface(evt.handle);
             }
         }
     }
