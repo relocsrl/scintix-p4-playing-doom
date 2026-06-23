@@ -34,7 +34,7 @@ static portMUX_TYPE s_settings_lock = portMUX_INITIALIZER_UNLOCKED;
  * CPU otherwise does is offloaded to the PPA SRM engine, which writes straight
  * into a DPI frame buffer. With two frame buffers we render into the back one
  * and page-flip; with one we render into the live buffer. */
-#define DPI_MAX_FBS 3
+#define DPI_MAX_FBS 2
 static ppa_client_handle_t s_ppa_client;
 static bool s_ppa_init_done;     /* init attempted (success or not) */
 static bool s_ppa_available;     /* fast path usable */
@@ -471,9 +471,7 @@ static void ppa_lazy_init(void)
      * count (it rejects counts above num_fbs). */
     for (int n = DPI_MAX_FBS; n >= 1; n--) {
         esp_err_t err;
-        if (n == 3) {
-            err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 3, &s_dpi_fbs[0], &s_dpi_fbs[1], &s_dpi_fbs[2]);
-        } else if (n == 2) {
+        if (n == 2) {
             err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 2, &s_dpi_fbs[0], &s_dpi_fbs[1]);
         } else {
             err = esp_lcd_dpi_panel_get_frame_buffer(s_panel, 1, &s_dpi_fbs[0]);

@@ -286,7 +286,22 @@ static void hid_gamepad_report_callback(hid_host_device_handle_t handle,
                                         size_t len)
 {
     static ds4_state_t prev = {};
+    static uint32_t raw_dumped = 0;
     ds4_state_t state = {};
+
+    /* Dump the first handful of raw reports so we can identify the layout of a
+     * non-DualShock controller (the DS4 parser below may misread it). */
+    if (raw_dumped < 12) {
+        char report[3 * 32 + 1] = {};
+        size_t bytes = len < 32 ? len : 32;
+        for (size_t i = 0; i < bytes; i++) {
+            char byte_text[4];
+            snprintf(byte_text, sizeof(byte_text), "%02X ", data[i]);
+            strlcat(report, byte_text, sizeof(report));
+        }
+        ESP_LOGI(TAG, "Raw HID report len=%u data=%s", (unsigned)len, report);
+        raw_dumped++;
+    }
 
     if (ds4_parse_usb_report(data, len, &state)) {
         bool was_active = is_active_gamepad_handle(handle);
@@ -364,14 +379,24 @@ static void hid_host_device_event(hid_host_device_handle_t hid_device_handle,
              dev_info.VID, dev_info.PID, dev_params.addr, dev_params.iface_num,
              hid_proto_name(dev_params.proto), dev_params.sub_class);
 
-    if (dev_info.VID != 0 && !is_ds4_device(dev_info.VID, dev_info.PID)) {
-        ESP_LOGI(TAG, "Ignoring non-DS4 HID device vid=0x%04x pid=0x%04x",
-                 dev_info.VID, dev_info.PID);
+    const bool is_ds4 = is_ds4_device(dev_info.VID, dev_info.PID);
+    /* Genuine DualShock 4: the gamepad is on interface 0 (others are audio/extra),
+     * so keep using only iface 0. Any other device: accept generic-protocol HID
+     * interfaces (proto == NONE) regardless of VID:PID, so third-party
+     * "PS4/PS3/PC" pads are tried too. Keyboards/mice (BOOT protocols) are still
+     * skipped. */
+    if (is_ds4) {
+        if (dev_params.iface_num != 0) {
+            ESP_LOGI(TAG, "Ignoring DS4 non-gamepad HID interface %u", dev_params.iface_num);
+            return;
+        }
+    } else if (dev_params.proto != HID_PROTOCOL_NONE) {
+        ESP_LOGI(TAG, "Ignoring HID %s device vid=0x%04x pid=0x%04x",
+                 hid_proto_name(dev_params.proto), dev_info.VID, dev_info.PID);
         return;
-    }
-    if (is_ds4_device(dev_info.VID, dev_info.PID) && dev_params.iface_num != 0) {
-        ESP_LOGI(TAG, "Ignoring DS4 non-gamepad HID interface %u", dev_params.iface_num);
-        return;
+    } else {
+        ESP_LOGI(TAG, "Trying generic HID gamepad vid=0x%04x pid=0x%04x iface=%u",
+                 dev_info.VID, dev_info.PID, dev_params.iface_num);
     }
 
     const hid_host_device_config_t dev_config = {
@@ -463,7 +488,7 @@ static void usb_gamepad_task(void *arg)
     };
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(hid_host_install(&hid_host_driver_config));
-    ESP_LOGI(TAG, "USB HID gamepad host ready; plug in wired DualShock 4");
+    ESP_LOGI(TAG, "USB HID gamepad host ready; plug in a wired controller");
 
     while (true) {
         if (xQueueReceive(s_gamepad_event_queue, &evt, portMAX_DELAY) == pdTRUE) {
