@@ -21,8 +21,8 @@ A port of DOOM running on the **SCINTIX P4**, our custom board based on the
 - **Display**: 7" **1024×600 MIPI-DSI** panel driven by the **EK79007** controller
   (landscape).
 - **Audio**: I²S codec + speaker.
-- **Controls**: USB PS4 (DualShock 4) controller, **wired only** (the C6 path is
-  not used for the gamepad).
+- **Controls**: wired **USB** — a PS4 (DualShock 4) gamepad **or** a standard USB
+  keyboard (the C6 path is not used for input).
 
 ## What this fork changes vs. the original
 
@@ -44,6 +44,11 @@ A port of DOOM running on the **SCINTIX P4**, our custom board based on the
   per-pixel divide) plus identical-row `memcpy` dedup — stays in place for the
   cases the PPA fast path doesn't cover (colour adjustment, 90°/270° rotation).
 - **Build/runtime tuning**: `-O2`, PSRAM @ 250 MHz, flash QIO, 1 kHz FreeRTOS tick.
+- **USB keyboard support.** Besides the DualShock 4 gamepad, a standard USB
+  keyboard can drive the game: arrows = move/turn, **Ctrl** = fire, **Space** =
+  use/open, **Shift** = run, **Alt** (with arrows) or **`,`/`.`** = strafe,
+  **`1`–`7`** = weapon select, **Esc/Enter/Tab** = menu/confirm/automap. Gamepad
+  and keyboard work interchangeably, selected automatically by what's plugged in.
 - **Stability fix**: larger HTTP server task stack to avoid a stack overflow when
   serving the configuration pages.
 
