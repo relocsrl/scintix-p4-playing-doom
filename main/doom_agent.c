@@ -66,27 +66,23 @@ static char *build_obs_json(const doom_agent_obs_t *o)
         cJSON_AddNumberToObject(r, "angle", o->angle_deg);
         cJSON_AddNumberToObject(r, "health", o->health);
         cJSON_AddNumberToObject(r, "armor", o->armor);
-        cJSON_AddNumberToObject(r, "weapon", o->weapon);
+        cJSON_AddStringToObject(r, "weapon", o->weapon);
         cJSON_AddNumberToObject(r, "ammo", o->ammo);
         cJSON_AddNumberToObject(r, "episode", o->episode);
         cJSON_AddNumberToObject(r, "map", o->map);
 
-        cJSON *front = cJSON_AddObjectToObject(r, "front");
-        if (front) {
-            cJSON_AddNumberToObject(front, "type", o->front_type);
-            cJSON_AddNumberToObject(front, "dist", o->front_dist);
-        }
-        cJSON *enemies = cJSON_AddArrayToObject(r, "enemies");
-        for (int i = 0; enemies && i < o->num_enemies; i++) {
-            cJSON *e = cJSON_CreateObject();
-            if (!e) {
+        /* Only what the player can see on screen (in the field of view, in line
+         * of sight), left-to-right. No targeting hints. */
+        cJSON *visible = cJSON_AddArrayToObject(r, "visible");
+        for (int i = 0; visible && i < o->num_visible; i++) {
+            cJSON *t = cJSON_CreateObject();
+            if (!t) {
                 break;
             }
-            cJSON_AddNumberToObject(e, "type", o->enemies[i].type);
-            cJSON_AddNumberToObject(e, "dist", o->enemies[i].dist);
-            cJSON_AddNumberToObject(e, "bearing", o->enemies[i].bearing_deg);
-            cJSON_AddBoolToObject(e, "sight", o->enemies[i].in_sight);
-            cJSON_AddItemToArray(enemies, e);
+            cJSON_AddStringToObject(t, "name", o->visible[i].name);
+            cJSON_AddNumberToObject(t, "dist", o->visible[i].dist);
+            cJSON_AddNumberToObject(t, "bearing", o->visible[i].bearing_deg);
+            cJSON_AddItemToArray(visible, t);
         }
     }
     char *out = cJSON_PrintUnformatted(r);

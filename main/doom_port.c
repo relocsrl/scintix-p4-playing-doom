@@ -411,7 +411,58 @@ static void agent_apply_and_tick(const doom_agent_action_t *a)
     doomgeneric_Tick(); /* flush the key releases, refresh the frame */
 }
 
-/* Capture the current game state into an observation. Runs on the Doom task. */
+/* Half of Doom's ~90-degree horizontal field of view: things outside this cone
+ * are off-screen, so the agent shouldn't know about them. */
+#define AGENT_FOV_DEG 45
+
+static const char *name_for_type(mobjtype_t type)
+{
+    switch (type) {
+    case MT_PLAYER:    return "player";
+    case MT_POSSESSED: return "zombieman";
+    case MT_SHOTGUY:   return "shotgun_guy";
+    case MT_VILE:      return "archvile";
+    case MT_UNDEAD:    return "revenant";
+    case MT_FATSO:     return "mancubus";
+    case MT_CHAINGUY:  return "chaingunner";
+    case MT_TROOP:     return "imp";
+    case MT_SERGEANT:  return "pinky";
+    case MT_SHADOWS:   return "spectre";
+    case MT_HEAD:      return "cacodemon";
+    case MT_BRUISER:   return "baron";
+    case MT_KNIGHT:    return "hell_knight";
+    case MT_SKULL:     return "lost_soul";
+    case MT_SPIDER:    return "spider_mastermind";
+    case MT_BABY:      return "arachnotron";
+    case MT_CYBORG:    return "cyberdemon";
+    case MT_PAIN:      return "pain_elemental";
+    case MT_WOLFSS:    return "ss_nazi";
+    case MT_KEEN:      return "commander_keen";
+    case MT_BARREL:    return "barrel";
+    default:           return "thing";
+    }
+}
+
+static const char *weapon_name(weapontype_t w)
+{
+    switch (w) {
+    case wp_fist:         return "fist";
+    case wp_pistol:       return "pistol";
+    case wp_shotgun:      return "shotgun";
+    case wp_chaingun:     return "chaingun";
+    case wp_missile:      return "rocket_launcher";
+    case wp_plasma:       return "plasma_rifle";
+    case wp_bfg:          return "bfg9000";
+    case wp_chainsaw:     return "chainsaw";
+    case wp_supershotgun: return "super_shotgun";
+    default:              return "unknown";
+    }
+}
+
+/* Capture what the player can currently SEE into an observation. Runs on the
+ * Doom task. Only things inside the rendered field of view and in line of sight
+ * are reported (no enemies behind/occluded), with no targeting hints — the goal
+ * is to mirror the on-screen view, leaving all tactical choices to the agent. */
 static void agent_capture_obs(doom_agent_obs_t *o)
 {
     memset(o, 0, sizeof(*o));
@@ -428,25 +479,14 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     o->angle_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
     o->health = pl->health;
     o->armor = pl->armorpoints;
-    o->weapon = pl->readyweapon;
     int ammotype = weaponinfo[pl->readyweapon].ammo;
     o->ammo = (ammotype >= 0 && ammotype < NUMAMMO) ? pl->ammo[ammotype] : -1;
+    strlcpy(o->weapon, weapon_name(pl->readyweapon), sizeof(o->weapon));
     o->episode = gameepisode;
     o->map = gamemap;
 
-    /* What's directly in front of the player (autoaim along the facing). */
-    P_AimLineAttack(pm, pm->angle, MISSILERANGE);
-    if (linetarget != NULL) {
-        o->front_type = linetarget->type;
-        o->front_dist = P_AproxDistance(linetarget->x - pm->x, linetarget->y - pm->y) >> FRACBITS;
-    } else {
-        o->front_type = -1;
-        o->front_dist = -1;
-    }
-
-    /* Nearby shootable things (monsters), with distance, bearing and line-of-sight. */
     int n = 0;
-    for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_ENEMIES; th = th->next) {
+    for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_VISIBLE; th = th->next) {
         if (th->function.acp1 != (actionf_p1)P_MobjThinker) {
             continue;
         }
@@ -454,18 +494,36 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         if (mo == pm || mo->health <= 0 || !(mo->flags & MF_SHOOTABLE)) {
             continue;
         }
+        /* In front, within the rendered field of view... */
         angle_t rel = R_PointToAngle2(pm->x, pm->y, mo->x, mo->y) - pm->angle;
         int bearing = (int)(((uint64_t)rel * 360u) >> 32);
         if (bearing > 180) {
             bearing -= 360;
         }
-        o->enemies[n].type = mo->type;
-        o->enemies[n].dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
-        o->enemies[n].bearing_deg = bearing;
-        o->enemies[n].in_sight = P_CheckSight(pm, mo);
+        if (bearing < -AGENT_FOV_DEG || bearing > AGENT_FOV_DEG) {
+            continue;
+        }
+        /* ...and not hidden behind walls. */
+        if (!P_CheckSight(pm, mo)) {
+            continue;
+        }
+        strlcpy(o->visible[n].name, name_for_type(mo->type), sizeof(o->visible[n].name));
+        o->visible[n].dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
+        o->visible[n].bearing_deg = bearing;
         n++;
     }
-    o->num_enemies = n;
+    o->num_visible = n;
+
+    /* Order left-to-right by bearing — the spatial layout on screen, not a priority. */
+    for (int i = 1; i < n; i++) {
+        doom_agent_thing_t t = o->visible[i];
+        int j = i - 1;
+        while (j >= 0 && o->visible[j].bearing_deg > t.bearing_deg) {
+            o->visible[j + 1] = o->visible[j];
+            j--;
+        }
+        o->visible[j + 1] = t;
+    }
 }
 
 bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)

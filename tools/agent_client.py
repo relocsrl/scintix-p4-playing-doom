@@ -42,22 +42,19 @@ DEFAULT_TICS = 8
 
 def fmt_obs(obs: dict) -> str:
     if not obs.get("valid"):
-        return "  <no game state>"
-    front = obs.get("front", {})
+        return "  <no game state — are you inside a level?>"
     lines = [
         f"  pos=({obs['x']},{obs['y']},{obs['z']})  angle={obs['angle']}deg"
         f"  hp={obs['health']} armor={obs['armor']}  weapon={obs['weapon']} ammo={obs['ammo']}"
         f"  E{obs['episode']}M{obs['map']}",
-        f"  front: type={front.get('type')} dist={front.get('dist')}",
     ]
-    enemies = obs.get("enemies", [])
-    if enemies:
-        lines.append(f"  enemies ({len(enemies)}):")
-        for e in enemies:
-            sight = "LOS" if e["sight"] else "   "
-            lines.append(f"    type={e['type']:>4} dist={e['dist']:>6} bearing={e['bearing']:>4} {sight}")
+    visible = obs.get("visible", [])
+    if visible:
+        lines.append(f"  in view ({len(visible)}), left-to-right:")
+        for v in visible:
+            lines.append(f"    {v['name']:<18} dist={v['dist']:>6}  bearing={v['bearing']:>4}")
     else:
-        lines.append("  enemies: none")
+        lines.append("  in view: nothing")
     return "\n".join(lines)
 
 

@@ -11,7 +11,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
-#define DOOM_AGENT_MAX_ENEMIES 8
+#define DOOM_AGENT_MAX_VISIBLE 16
 
 typedef struct {
     int  move;    /* -1 back, 0 none, +1 forward */
@@ -23,24 +23,24 @@ typedef struct {
     int  tics;    /* game tics to advance this step (clamped 0..60) */
 } doom_agent_action_t;
 
+/* A thing the player can actually SEE this frame: inside the rendered field of
+ * view and not occluded by geometry. Deliberately no targeting hints — just what
+ * it is and where it is, like looking at the screen. */
 typedef struct {
-    int  type;        /* Doom mobjtype_t */
+    char name[16];    /* "zombieman", "imp", "barrel", ... */
     int  dist;        /* map units */
-    int  bearing_deg; /* -180..180, relative to player facing */
-    bool in_sight;
-} doom_agent_enemy_t;
+    int  bearing_deg; /* -45..45, relative to player facing (0 = centre of view) */
+} doom_agent_thing_t;
 
 typedef struct {
     bool valid;
     int  x, y, z;     /* map units */
-    int  angle_deg;   /* 0..359 */
-    int  health, armor;
-    int  weapon, ammo;
+    int  angle_deg;   /* 0..359, facing */
+    int  health, armor, ammo;
+    char weapon[16];  /* current weapon name */
     int  episode, map;
-    int  front_type;  /* mobjtype in front of the player, -1 = nothing */
-    int  front_dist;
-    int  num_enemies;
-    doom_agent_enemy_t enemies[DOOM_AGENT_MAX_ENEMIES];
+    int  num_visible;
+    doom_agent_thing_t visible[DOOM_AGENT_MAX_VISIBLE];
 } doom_agent_obs_t;
 
 /* Register the "/agent" WebSocket endpoint on an existing HTTP server. */
