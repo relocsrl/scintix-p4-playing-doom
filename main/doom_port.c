@@ -13,9 +13,18 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
+#include "doom_agent.h"
+
+/* Doom engine internals, for the agent's state capture. The doomgeneric
+ * component exports its src/ directory as a public include dir. */
+#include "doomstat.h"
+#include "d_items.h"
+#include "p_local.h"
+#include "r_main.h"
 
 #define DOOM_WAD_PATH "/spiffs/doom1.wad"
 #define DOOM_EVENT_QUEUE_LEN 32
@@ -35,6 +44,16 @@ static uint32_t s_last_gamepad_sequence;
 static uint32_t s_last_keyboard_sequence;
 static usb_keyboard_state_t s_kbd_prev;
 static bool s_spiffs_mounted;
+
+/* Agent (lockstep) bridge. The WebSocket task hands an action to the Doom task
+ * via s_agent_step_req, waits on s_agent_step_done, then reads s_agent_obs. */
+static SemaphoreHandle_t s_agent_step_req;
+static SemaphoreHandle_t s_agent_step_done;
+static doom_agent_action_t s_agent_action;
+static doom_agent_obs_t s_agent_obs;
+static volatile bool s_agent_active;
+static volatile bool s_doom_ready;
+static int s_agent_idle_ms;
 
 enum {
     DOOM_KEY_UP = 1U << 0,
@@ -336,6 +355,142 @@ static void print_doom_banner(void)
            "         SCINTIX P4 — rip and tear!\n\n");
 }
 
+/* Inject the agent's action as held keys, advance the requested tics, then
+ * release. Runs on the Doom task. A final tick is always run so the key
+ * releases are processed and the captured frame is current. */
+static void agent_apply_and_tick(const doom_agent_action_t *a)
+{
+    int tics = a->tics;
+    if (tics < 0) {
+        tics = 0;
+    }
+    if (tics > 60) {
+        tics = 60;
+    }
+
+    unsigned char held[6];
+    int n = 0;
+    if (a->move > 0) {
+        held[n++] = KEY_UPARROW;
+    } else if (a->move < 0) {
+        held[n++] = KEY_DOWNARROW;
+    }
+    if (a->turn < 0) {
+        held[n++] = KEY_LEFTARROW;
+    } else if (a->turn > 0) {
+        held[n++] = KEY_RIGHTARROW;
+    }
+    if (a->strafe < 0) {
+        held[n++] = KEY_STRAFE_L;
+    } else if (a->strafe > 0) {
+        held[n++] = KEY_STRAFE_R;
+    }
+    if (a->fire) {
+        held[n++] = KEY_FIRE;
+    }
+    if (a->use) {
+        held[n++] = KEY_USE;
+    }
+    unsigned char weapon_key = (a->weapon >= 1 && a->weapon <= 7) ? (unsigned char)('0' + a->weapon) : 0;
+
+    for (int i = 0; i < n; i++) {
+        queue_key_event(1, held[i]);
+    }
+    if (weapon_key) {
+        queue_key_event(1, weapon_key);
+    }
+    for (int i = 0; i < tics; i++) {
+        doomgeneric_Tick();
+    }
+    for (int i = 0; i < n; i++) {
+        queue_key_event(0, held[i]);
+    }
+    if (weapon_key) {
+        queue_key_event(0, weapon_key);
+    }
+    doomgeneric_Tick(); /* flush the key releases, refresh the frame */
+}
+
+/* Capture the current game state into an observation. Runs on the Doom task. */
+static void agent_capture_obs(doom_agent_obs_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    player_t *pl = &players[consoleplayer];
+    mobj_t *pm = pl->mo;
+    if (pm == NULL) {
+        o->valid = false;
+        return;
+    }
+    o->valid = true;
+    o->x = pm->x >> FRACBITS;
+    o->y = pm->y >> FRACBITS;
+    o->z = pm->z >> FRACBITS;
+    o->angle_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+    o->health = pl->health;
+    o->armor = pl->armorpoints;
+    o->weapon = pl->readyweapon;
+    int ammotype = weaponinfo[pl->readyweapon].ammo;
+    o->ammo = (ammotype >= 0 && ammotype < NUMAMMO) ? pl->ammo[ammotype] : -1;
+    o->episode = gameepisode;
+    o->map = gamemap;
+
+    /* What's directly in front of the player (autoaim along the facing). */
+    P_AimLineAttack(pm, pm->angle, MISSILERANGE);
+    if (linetarget != NULL) {
+        o->front_type = linetarget->type;
+        o->front_dist = P_AproxDistance(linetarget->x - pm->x, linetarget->y - pm->y) >> FRACBITS;
+    } else {
+        o->front_type = -1;
+        o->front_dist = -1;
+    }
+
+    /* Nearby shootable things (monsters), with distance, bearing and line-of-sight. */
+    int n = 0;
+    for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_ENEMIES; th = th->next) {
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) {
+            continue;
+        }
+        mobj_t *mo = (mobj_t *)th;
+        if (mo == pm || mo->health <= 0 || !(mo->flags & MF_SHOOTABLE)) {
+            continue;
+        }
+        angle_t rel = R_PointToAngle2(pm->x, pm->y, mo->x, mo->y) - pm->angle;
+        int bearing = (int)(((uint64_t)rel * 360u) >> 32);
+        if (bearing > 180) {
+            bearing -= 360;
+        }
+        o->enemies[n].type = mo->type;
+        o->enemies[n].dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
+        o->enemies[n].bearing_deg = bearing;
+        o->enemies[n].in_sight = P_CheckSight(pm, mo);
+        n++;
+    }
+    o->num_enemies = n;
+}
+
+bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)
+{
+    if (!s_doom_ready || s_agent_step_req == NULL) {
+        memset(obs, 0, sizeof(*obs));
+        return false;
+    }
+    s_agent_active = true;
+    s_agent_action = *action;
+    xSemaphoreGive(s_agent_step_req);
+    if (xSemaphoreTake(s_agent_step_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        memset(obs, 0, sizeof(*obs));
+        return false;
+    }
+    *obs = s_agent_obs;
+    return true;
+}
+
+void doom_agent_set_active(bool active)
+{
+    s_agent_active = active;
+    s_agent_idle_ms = 0;
+}
+
 static void doom_task(void *arg)
 {
     (void)arg;
@@ -363,15 +518,40 @@ static void doom_task(void *arg)
     print_doom_banner();
     ESP_LOGI(TAG, "Starting Doom");
     doomgeneric_Create(argc, argv);
+    s_doom_ready = true;
 
     while (true) {
-        doomgeneric_Tick();
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if (s_agent_active) {
+            /* Lockstep: pause until the agent submits an action, advance, reply. */
+            if (xSemaphoreTake(s_agent_step_req, pdMS_TO_TICKS(200)) == pdTRUE) {
+                s_agent_idle_ms = 0;
+                agent_apply_and_tick(&s_agent_action);
+                agent_capture_obs(&s_agent_obs);
+                xSemaphoreGive(s_agent_step_done);
+            } else {
+                s_agent_idle_ms += 200;
+                if (s_agent_idle_ms >= 5000) {
+                    /* Controller vanished without closing — resume real-time play. */
+                    s_agent_active = false;
+                    ESP_LOGW(TAG, "agent idle, resuming real-time play");
+                }
+            }
+        } else {
+            doomgeneric_Tick();
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 }
 
 esp_err_t doom_port_start(void)
 {
+    s_agent_step_req = xSemaphoreCreateBinary();
+    s_agent_step_done = xSemaphoreCreateBinary();
+    if (s_agent_step_req == NULL || s_agent_step_done == NULL) {
+        ESP_LOGE(TAG, "Failed to create agent semaphores");
+        return ESP_ERR_NO_MEM;
+    }
+
     BaseType_t created = xTaskCreatePinnedToCore(doom_task, "doom", 16384, NULL, tskIDLE_PRIORITY, NULL, 1);
     return created == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }

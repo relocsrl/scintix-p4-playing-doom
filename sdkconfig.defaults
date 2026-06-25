@@ -43,6 +43,8 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCP_SACK_OUT=y
+# WebSocket support in the HTTP server, for the agent (LLM/MCP) API endpoint.
+CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
 # Display: esp32_p4_function_ev_board BSP driving the EK79007 1024x600 MIPI-DSI
 # panel (same as the working Brookesia demo on this board). Touch/camera are

@@ -34,6 +34,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "audio_doom.h"
+#include "doom_agent.h"
 #include "doom_port.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
@@ -693,6 +694,7 @@ static esp_err_t start_portal_servers(void)
         (err = httpd_register_uri_handler(s_portal_server, &settings_save)) != ESP_OK ||
         (err = httpd_register_uri_handler(s_portal_server, &api_settings)) != ESP_OK ||
         (err = httpd_register_uri_handler(s_portal_server, &api_controller)) != ESP_OK ||
+        (err = doom_agent_register(s_portal_server)) != ESP_OK ||
         (err = httpd_register_err_handler(s_portal_server, HTTPD_404_NOT_FOUND, portal_404_handler)) != ESP_OK) {
         ESP_LOGE(NET_TAG, "HTTP portal handler registration failed: %s", esp_err_to_name(err));
         httpd_stop(s_portal_server);
