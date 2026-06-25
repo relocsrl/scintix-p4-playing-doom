@@ -82,7 +82,10 @@ pin names. To attach an external **ES8311** audio module (e.g. the
 | I²S **BCLK** | GPIO12 | **ID_SD** |
 | I²S **WS / LRCK** | GPIO6 | **GPIO9** |
 | I²S **DOUT** (→ codec) | GPIO9 | **GPIO19** |
-| **5V** / **GND** | — | 5V / GND |
+
+**Power & ground** (40-pin header): the **display** runs at **5V** (pin **2** or **4**);
+the **ES8311 module** (M5 EchoBase) runs at **3.3V** (pin **1** or **17**); **GND** on
+pin **39** (or any other ground pin: 6/9/14/20/25/30/34).
 
 The ES8311 (`0x18`) and the EchoBase PI4IOE5V6408 I/O expander (`0x43`) share that
 I²C bus; **no external MCLK** is required (the codec clocks off SCLK). For
