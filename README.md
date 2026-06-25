@@ -134,6 +134,6 @@ first flash takes a while.
 This project is released under the [GNU GPL v3.0](LICENSE).
 
 - Original work © 2026 **Mazur888**.
-- SCINTIX P4 adaptations © 2026 **RELOC s.r.l.**.
+- SCINTIX P4 adaptations and improvements © 2026 **RELOC s.r.l.**.
 
 No warranty; use at your own risk.
