@@ -68,6 +68,27 @@ Together these bring the game to a steady **~30 FPS** — Doom's own software re
 - WAD shipped in SPIFFS. WAD forked from
   [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads).
 
+## Audio wiring (SCINTIX P4 on a Raspberry Pi CM5 IO Board)
+
+The SCINTIX P4 (RM-CMP4) module sits on a **Raspberry Pi CM5 IO Board**, so the
+ESP32-P4 GPIOs surface on the board's **40-pin header** under the Raspberry Pi
+pin names. To attach an external **ES8311** audio module (e.g. the
+[M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase)), wire:
+
+| Signal | ESP32-P4 GPIO | CM5 IO 40-pin (RPi) |
+|---|---|---|
+| I²C **SDA** (codec + expander) | GPIO7 | **GPIO11** |
+| I²C **SCL** | GPIO8 | **GPIO5** |
+| I²S **BCLK** | GPIO12 | **ID_SD** |
+| I²S **WS / LRCK** | GPIO6 | **GPIO9** |
+| I²S **DOUT** (→ codec) | GPIO9 | **GPIO19** |
+| **5V** / **GND** | — | 5V / GND |
+
+The ES8311 (`0x18`) and the EchoBase PI4IOE5V6408 I/O expander (`0x43`) share that
+I²C bus; **no external MCLK** is required (the codec clocks off SCLK). For
+reference, the display signals are routed the same way: backlight P4 `GPIO3` →
+RPi `GPIO27`, reset P4 `GPIO4` → RPi `GPIO22`.
+
 ## Build, flash and monitor
 
 Built with **ESP-IDF v5.5.x**.
