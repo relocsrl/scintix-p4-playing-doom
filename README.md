@@ -96,7 +96,7 @@ first flash takes a while.
 
 ## Links & references
 
-- **SCINTIX P4 board** — crowdfunding on [Crowd Supply](https://www.crowdsupply.com/reloc/scintix-p4) (by RELOC s.r.l.)
+- **SCINTIX P4 board** — [product page @ RELOC](https://www.reloc.it/products/rm-cmp4/) · crowdfunding on [Crowd Supply](https://www.crowdsupply.com/reloc/scintix-p4)
 - **Original DOOM ESP32-P4 port** (upstream of this fork) — [mazur888/DOOM-working-on-ESP32-P4-C6](https://github.com/mazur888/DOOM-working-on-ESP32-P4-C6)
 - **doomgeneric** (portable Doom core) — [ozkl/doomgeneric](https://github.com/ozkl/doomgeneric)
 - **WAD** (shareware `doom1.wad`) — [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads)
