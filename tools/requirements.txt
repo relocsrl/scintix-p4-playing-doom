@@ -1,0 +1,3 @@
+# Python deps for the SCINTIX P4 DOOM agent tools.
+#   pip install -r tools/requirements.txt
+websockets>=12.0
