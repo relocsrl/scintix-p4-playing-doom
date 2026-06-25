@@ -31,13 +31,20 @@
 #define JC_AUDIO_I2C_SDA GPIO_NUM_7
 #define JC_AUDIO_I2C_SCL GPIO_NUM_8
 #define JC_AUDIO_I2S_PORT I2S_NUM_0
-#define JC_AUDIO_I2S_MCLK GPIO_NUM_13
 #define JC_AUDIO_I2S_BCLK GPIO_NUM_12
-#define JC_AUDIO_I2S_LRCLK GPIO_NUM_10
+#define JC_AUDIO_I2S_LRCLK GPIO_NUM_6
 #define JC_AUDIO_I2S_DOUT GPIO_NUM_9
-#define JC_AUDIO_PA_ENABLE GPIO_NUM_11
 #define JC_AUDIO_ES8311_ADDR ES8311_CODEC_DEFAULT_ADDR
 #define JC_AUDIO_MCLK_MULTIPLE 256
+
+/* M5 Atomic EchoBase: ES8311 has no external MCLK (clock derived from SCLK), and
+ * the speaker amp (NS4150B) is muted/unmuted through a PI4IOE5V6408 I/O expander
+ * on the same I2C bus, not via a GPIO PA-enable. */
+#define ECHOBASE_IOEXP_ADDR 0x43
+#define ECHOBASE_IOEXP_REG_IO_PP 0x07
+#define ECHOBASE_IOEXP_REG_IO_DIR 0x03
+#define ECHOBASE_IOEXP_REG_IO_OUT 0x05
+#define ECHOBASE_IOEXP_REG_IO_PULLUP 0x0D
 #define JC_AUDIO_NVS_NAMESPACE "doom_audio"
 #define JC_AUDIO_NVS_VOLUME_KEY "volume"
 
@@ -191,7 +198,7 @@ static esp_err_t init_i2s(void)
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(DOOM_AUDIO_SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
-            .mclk = JC_AUDIO_I2S_MCLK,
+            .mclk = I2S_GPIO_UNUSED, /* EchoBase ES8311 derives its clock from SCLK */
             .bclk = JC_AUDIO_I2S_BCLK,
             .ws = JC_AUDIO_I2S_LRCLK,
             .dout = JC_AUDIO_I2S_DOUT,
@@ -207,6 +214,39 @@ static esp_err_t init_i2s(void)
 
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_i2s_tx, &std_cfg), TAG, "I2S std init failed");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_i2s_tx), TAG, "I2S enable failed");
+    return ESP_OK;
+}
+
+/* The EchoBase speaker amp is muted/enabled through a PI4IOE5V6408 I/O expander
+ * (I2C 0x43) on the same bus as the codec. Without this the output is silent.
+ * Mirrors the M5 init: configure the pins as outputs and drive them high. */
+static esp_err_t echobase_unmute(i2c_master_bus_handle_t bus)
+{
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = ECHOBASE_IOEXP_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "EchoBase I/O expander add failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    const uint8_t seq[][2] = {
+        {ECHOBASE_IOEXP_REG_IO_PP, 0x00},      /* push-pull / high-Z config */
+        {ECHOBASE_IOEXP_REG_IO_PULLUP, 0xFF},  /* enable pull-ups */
+        {ECHOBASE_IOEXP_REG_IO_DIR, 0x6F},     /* pin directions */
+        {ECHOBASE_IOEXP_REG_IO_OUT, 0xFF},     /* outputs high -> unmute / amp on */
+    };
+    for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
+        err = i2c_master_transmit(dev, seq[i], sizeof(seq[i]), 100);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "EchoBase expander reg 0x%02x write failed: %s", seq[i][0], esp_err_to_name(err));
+        }
+    }
+    ESP_LOGI(TAG, "EchoBase I/O expander configured (amp unmuted)");
     return ESP_OK;
 }
 
@@ -247,8 +287,8 @@ static esp_err_t init_codec(void)
         .gpio_if = gpio_if,
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
         .master_mode = false,
-        .use_mclk = true,
-        .pa_pin = JC_AUDIO_PA_ENABLE,
+        .use_mclk = false,          /* EchoBase: clock from SCLK, no external MCLK */
+        .pa_pin = -1,               /* amp enable is via the PI4IOE expander, not a GPIO */
         .pa_reverted = false,
         .hw_gain = {
             .pa_voltage = 5.0,
@@ -277,6 +317,9 @@ static esp_err_t init_codec(void)
                         ESP_FAIL, TAG, "codec open failed");
     ESP_RETURN_ON_FALSE(esp_codec_dev_set_out_vol(s_codec, doom_audio_get_volume()) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "codec volume failed");
+
+    /* Unmute the EchoBase speaker amp via its I/O expander (same I2C bus). */
+    echobase_unmute(i2c_bus);
     return ESP_OK;
 }
 

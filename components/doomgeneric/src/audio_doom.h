@@ -4,7 +4,7 @@
 
 #include "esp_err.h"
 
-#define DOOM_AUDIO_DEFAULT_VOLUME 35
+#define DOOM_AUDIO_DEFAULT_VOLUME 85
 #define DOOM_AUDIO_MAX_VOLUME 100
 
 uint8_t doom_audio_get_volume(void);
