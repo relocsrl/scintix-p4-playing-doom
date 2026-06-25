@@ -20,7 +20,8 @@ A port of DOOM running on the **SCINTIX P4**, our custom board based on the
   via `esp_hosted` / `esp_wifi_remote`.
 - **Display**: 7" **1024×600 MIPI-DSI** panel driven by the **EK79007** controller
   (landscape).
-- **Audio**: I²S codec + speaker.
+- **Audio**: **ES8311** I²S codec + speaker — tested with the external
+  [M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase).
 - **Controls**: wired **USB** — a PS4 (DualShock 4) gamepad **or** a standard USB
   keyboard (the C6 path is not used for input).
 
@@ -49,6 +50,11 @@ A port of DOOM running on the **SCINTIX P4**, our custom board based on the
   use/open, **Shift** = run, **Alt** (with arrows) or **`,`/`.`** = strafe,
   **`1`–`7`** = weapon select, **Esc/Enter/Tab** = menu/confirm/automap. Gamepad
   and keyboard work interchangeably, selected automatically by what's plugged in.
+- **Audio (SFX).** Sound effects play through an **ES8311** codec over I²S, tested
+  with the [M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase)
+  (ES8311 + NS4150B amp + PI4IOE5V6408 I/O expander): the codec clock is derived
+  from SCLK (no external MCLK) and the amplifier is unmuted via the I/O expander.
+  Output volume is adjustable from the web settings page. (Music is disabled — SFX only.)
 - **Stability fix**: larger HTTP server task stack to avoid a stack overflow when
   serving the configuration pages.
 
@@ -87,6 +93,17 @@ first flash takes a while.
 - Connect, enter your Wi-Fi SSID and password, and save.
 - Use the serial monitor or a network scanner to find the device IP, then open it
   in a browser for the settings page.
+
+## Links & references
+
+- **SCINTIX P4 board** — crowdfunding on [Crowd Supply](https://www.crowdsupply.com/reloc/scintix-p4) (by RELOC s.r.l.)
+- **Original DOOM ESP32-P4 port** (upstream of this fork) — [mazur888/DOOM-working-on-ESP32-P4-C6](https://github.com/mazur888/DOOM-working-on-ESP32-P4-C6)
+- **doomgeneric** (portable Doom core) — [ozkl/doomgeneric](https://github.com/ozkl/doomgeneric)
+- **WAD** (shareware `doom1.wad`) — [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads)
+- **Audio module** — [M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase) (ES8311 + NS4150B)
+- **ESP-IDF** v5.5.x — [espressif/esp-idf](https://github.com/espressif/esp-idf)
+- **ESP-Hosted** / Wi-Fi remote (P4↔C6) — [esp-hosted](https://github.com/espressif/esp-hosted) · [esp_wifi_remote](https://components.espressif.com/components/espressif/esp_wifi_remote)
+- **ESP32-P4 PPA** (hardware scaler) — [PPA API docs](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/peripherals/ppa.html)
 
 ## License
 
