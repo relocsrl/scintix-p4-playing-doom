@@ -955,17 +955,20 @@ static void init_wifi_with_portal(void)
     wifi_config_t saved_wifi_config = {};
     if (load_saved_wifi_config(&saved_wifi_config)) {
         ESP_LOGI(NET_TAG, "Saved Wi-Fi credentials found for SSID '%s'; starting STA", saved_wifi_config.sta.ssid);
-        err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
-        if (err != ESP_OK) {
-            ESP_LOGE(NET_TAG, "Failed to apply saved Wi-Fi credentials: %s", esp_err_to_name(err));
-            return;
-        }
+        /* Mode must be set before the interface config — esp_wifi_set_config
+         * returns ESP_ERR_WIFI_MODE otherwise. */
         err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err == ESP_OK) {
+            err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
+        }
+        if (err == ESP_OK) {
             err = esp_wifi_start();
-            if (err == ESP_OK) {
-                s_wifi_started = true;
-            }
+        }
+        if (err == ESP_OK) {
+            s_wifi_started = true;
+        } else {
+            ESP_LOGE(NET_TAG, "STA setup failed (%s); falling back to captive portal", esp_err_to_name(err));
+            err = start_wifi_portal();
         }
     } else {
         ESP_LOGI(NET_TAG, "No saved Wi-Fi credentials; starting captive portal");
