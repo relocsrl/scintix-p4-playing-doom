@@ -43,6 +43,23 @@ typedef struct {
     doom_agent_thing_t visible[DOOM_AGENT_MAX_VISIBLE];
 } doom_agent_obs_t;
 
+/* ASCII automap: a bounded grid mirroring the player's in-game automap — only
+ * the wall lines the player has already discovered, plus the player marker.
+ * North is up. '#' = revealed wall, '@' = player, ' ' = undiscovered/empty.
+ * No monsters or items (the real automap doesn't show them without cheats). */
+#define DOOM_AGENT_MAP_COLS 64
+#define DOOM_AGENT_MAP_ROWS 32
+
+typedef struct {
+    bool valid;
+    int  rows, cols;
+    int  units_per_cell;       /* map units per character cell */
+    int  origin_x, origin_y;   /* map coords of the top-left cell [0][0] */
+    int  player_col, player_row;
+    int  angle_deg;
+    char grid[DOOM_AGENT_MAP_ROWS][DOOM_AGENT_MAP_COLS + 1]; /* NUL-terminated rows */
+} doom_agent_map_t;
+
 /* Register the "/agent" WebSocket endpoint on an existing HTTP server. */
 esp_err_t doom_agent_register(httpd_handle_t server);
 
@@ -52,4 +69,5 @@ esp_err_t doom_agent_register(httpd_handle_t server);
  * - doom_agent_set_active: enter/leave lockstep (the game pauses between steps
  *   while active; it free-runs otherwise). */
 bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs);
+bool doom_agent_get_map(doom_agent_map_t *map);
 void doom_agent_set_active(bool active);

@@ -19,6 +19,7 @@ REPL commands (optional integer = tics to advance, default 8):
     f [n]  fire         u [n]  use/open
     1..7   select weapon
     o      observe only (no movement)
+    m      show the automap (ASCII, discovered walls only)
     raw {...json...}    send a raw action object
     quit / q!          exit
 
@@ -58,11 +59,21 @@ def fmt_obs(obs: dict) -> str:
     return "\n".join(lines)
 
 
+def fmt_map(m: dict) -> str:
+    if not m.get("valid"):
+        return "  <no map — are you inside a level?>"
+    p = m.get("player", {})
+    lines = [f"  automap  scale={m['units_per_cell']} units/cell  "
+             f"player col={p.get('col')} row={p.get('row')} angle={p.get('angle')}deg  (north up)"]
+    lines += ["  " + row for row in m.get("grid", [])]
+    return "\n".join(lines)
+
+
 async def send(ws, action: dict):
     await ws.send(json.dumps(action))
-    obs = json.loads(await ws.recv())
-    print(fmt_obs(obs))
-    return obs
+    resp = json.loads(await ws.recv())
+    print(fmt_map(resp) if "grid" in resp else fmt_obs(resp))
+    return resp
 
 
 async def demo(ws):
@@ -98,17 +109,20 @@ def parse_cmd(line: str):
     tics = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else DEFAULT_TICS
     if tok == "o":
         return {"tics": 0}
+    if tok == "m":
+        return {"request": "map"}
     if tok.isdigit() and 1 <= int(tok) <= 7:
         return {"weapon": int(tok), "tics": 2}
     if tok in SHORTHAND:
         key, val = SHORTHAND[tok]
         return {key: val, "tics": tics}
-    print("  unknown command (try: w/s/a/d/q/e/f/u, 1-7, o, raw {...}, quit)")
+    print("  unknown command (try: w/s/a/d/q/e/f/u, 1-7, o, m, raw {...}, quit)")
     return None
 
 
 async def repl(ws):
-    print("Connected. Type commands (w/s/a/d=move/turn, q/e=strafe, f=fire, u=use, 1-7=weapon, o=observe, quit).")
+    print("Connected. Commands: w/s/a/d=move/turn, q/e=strafe, f=fire, u=use, 1-7=weapon, "
+          "o=observe, m=automap, quit.")
     loop = asyncio.get_event_loop()
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)

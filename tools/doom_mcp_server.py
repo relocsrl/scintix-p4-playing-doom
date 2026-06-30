@@ -114,5 +114,18 @@ def select_weapon(slot: int) -> dict:
     return _step({"weapon": slot, "tics": 2})
 
 
+@mcp.tool(description=(
+    "Get the in-game automap as ASCII art — the SAME information the player's own "
+    "automap shows: only the walls already discovered by exploring, plus your "
+    "position. North is up. In `grid`: '#' = a discovered wall, '@' = you, ' ' = "
+    "not yet discovered / empty. Areas you haven't explored are blank, and no "
+    "monsters or items are shown (the automap doesn't reveal them). Returns "
+    "{grid:[rows], cols, rows, units_per_cell (map units per character), "
+    "origin_x, origin_y (map coords of the top-left cell), player:{col,row,angle}}. "
+    "Advances no game time."))
+def get_map() -> dict:
+    return _step({"request": "map"})
+
+
 if __name__ == "__main__":
     mcp.run()

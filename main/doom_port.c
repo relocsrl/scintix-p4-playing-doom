@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -22,9 +23,11 @@
 /* Doom engine internals, for the agent's state capture. The doomgeneric
  * component exports its src/ directory as a public include dir. */
 #include "doomstat.h"
+#include "doomdata.h"
 #include "d_items.h"
 #include "p_local.h"
 #include "r_main.h"
+#include "r_state.h"
 
 #define DOOM_WAD_PATH "/spiffs/doom1.wad"
 #define DOOM_EVENT_QUEUE_LEN 32
@@ -51,6 +54,8 @@ static SemaphoreHandle_t s_agent_step_req;
 static SemaphoreHandle_t s_agent_step_done;
 static doom_agent_action_t s_agent_action;
 static doom_agent_obs_t s_agent_obs;
+static doom_agent_map_t s_agent_map;
+static volatile int s_agent_req_kind; /* 0 = step+observe, 1 = render map */
 static volatile bool s_agent_active;
 static volatile bool s_doom_ready;
 static int s_agent_idle_ms;
@@ -526,6 +531,94 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     }
 }
 
+/* Bresenham line into the ASCII grid, clipped to bounds. */
+static void agent_plot(doom_agent_map_t *m, int x0, int y0, int x1, int y1, char ch)
+{
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        if (x0 >= 0 && x0 < m->cols && y0 >= 0 && y0 < m->rows) {
+            m->grid[y0][x0] = ch;
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Render the discovered automap (revealed wall lines + player) into an ASCII
+ * grid, north up, auto-scaled to fit the whole revealed extent. Runs on the
+ * Doom task. Mirrors the in-game automap: only ML_MAPPED lines, no things. */
+static void agent_render_map(doom_agent_map_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->rows = DOOM_AGENT_MAP_ROWS;
+    m->cols = DOOM_AGENT_MAP_COLS;
+    for (int r = 0; r < m->rows; r++) {
+        memset(m->grid[r], ' ', m->cols);
+        m->grid[r][m->cols] = '\0';
+    }
+
+    player_t *pl = &players[consoleplayer];
+    mobj_t *pm = pl->mo;
+    if (pm == NULL) {
+        m->valid = false;
+        return;
+    }
+    m->valid = true;
+    m->angle_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+
+    const int px = pm->x >> FRACBITS;
+    const int py = pm->y >> FRACBITS;
+    int minx = px, maxx = px, miny = py, maxy = py;
+    for (int i = 0; i < numlines; i++) {
+        if (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW)) {
+            continue;
+        }
+        int xs[2] = {lines[i].v1->x >> FRACBITS, lines[i].v2->x >> FRACBITS};
+        int ys[2] = {lines[i].v1->y >> FRACBITS, lines[i].v2->y >> FRACBITS};
+        for (int k = 0; k < 2; k++) {
+            if (xs[k] < minx) minx = xs[k];
+            if (xs[k] > maxx) maxx = xs[k];
+            if (ys[k] < miny) miny = ys[k];
+            if (ys[k] > maxy) maxy = ys[k];
+        }
+    }
+
+    /* Square cells; pick the scale that fits the larger span. */
+    int upc_x = (maxx - minx) / (m->cols - 1) + 1;
+    int upc_y = (maxy - miny) / (m->rows - 1) + 1;
+    int upc = upc_x > upc_y ? upc_x : upc_y;
+    if (upc < 16) {
+        upc = 16; /* avoid over-zooming a tiny revealed area */
+    }
+    m->units_per_cell = upc;
+    m->origin_x = minx;
+    m->origin_y = maxy; /* row 0 = north (max y) */
+
+    for (int i = 0; i < numlines; i++) {
+        if (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW)) {
+            continue;
+        }
+        int c1 = ((lines[i].v1->x >> FRACBITS) - minx) / upc;
+        int r1 = (maxy - (lines[i].v1->y >> FRACBITS)) / upc;
+        int c2 = ((lines[i].v2->x >> FRACBITS) - minx) / upc;
+        int r2 = (maxy - (lines[i].v2->y >> FRACBITS)) / upc;
+        agent_plot(m, c1, r1, c2, r2, '#');
+    }
+
+    m->player_col = (px - minx) / upc;
+    m->player_row = (maxy - py) / upc;
+    if (m->player_row >= 0 && m->player_row < m->rows &&
+        m->player_col >= 0 && m->player_col < m->cols) {
+        m->grid[m->player_row][m->player_col] = '@';
+    }
+}
+
 bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)
 {
     if (!s_doom_ready || s_agent_step_req == NULL) {
@@ -533,6 +626,7 @@ bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)
         return false;
     }
     s_agent_active = true;
+    s_agent_req_kind = 0;
     s_agent_action = *action;
     xSemaphoreGive(s_agent_step_req);
     if (xSemaphoreTake(s_agent_step_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
@@ -540,6 +634,23 @@ bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)
         return false;
     }
     *obs = s_agent_obs;
+    return true;
+}
+
+bool doom_agent_get_map(doom_agent_map_t *map)
+{
+    if (!s_doom_ready || s_agent_step_req == NULL) {
+        memset(map, 0, sizeof(*map));
+        return false;
+    }
+    s_agent_active = true;
+    s_agent_req_kind = 1;
+    xSemaphoreGive(s_agent_step_req);
+    if (xSemaphoreTake(s_agent_step_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        memset(map, 0, sizeof(*map));
+        return false;
+    }
+    *map = s_agent_map;
     return true;
 }
 
@@ -583,8 +694,12 @@ static void doom_task(void *arg)
             /* Lockstep: pause until the agent submits an action, advance, reply. */
             if (xSemaphoreTake(s_agent_step_req, pdMS_TO_TICKS(200)) == pdTRUE) {
                 s_agent_idle_ms = 0;
-                agent_apply_and_tick(&s_agent_action);
-                agent_capture_obs(&s_agent_obs);
+                if (s_agent_req_kind == 1) {
+                    agent_render_map(&s_agent_map);
+                } else {
+                    agent_apply_and_tick(&s_agent_action);
+                    agent_capture_obs(&s_agent_obs);
+                }
                 xSemaphoreGive(s_agent_step_done);
             } else {
                 s_agent_idle_ms += 200;

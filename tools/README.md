@@ -41,7 +41,7 @@ REPL commands (optional integer = tics to advance, default 8):
 ```
 w/s = forward/back   a/d = turn left/right   q/e = strafe left/right
 f = fire   u = use/open   1-7 = select weapon   o = observe only
-raw {...json...} = send a raw action          quit = exit
+m = automap (ASCII)  raw {...json...} = send a raw action          quit = exit
 ```
 
 ## 2. Let an LLM play — `doom_mcp_server.py` (MCP)
@@ -51,7 +51,8 @@ client how to start it (command + args + the `DOOM_WS_URL` env var). It holds on
 persistent lockstep connection for the whole session.
 
 It exposes these tools: `observe`, `move_forward`, `move_back`, `turn_left`,
-`turn_right`, `strafe_left`, `strafe_right`, `fire`, `use_`, `select_weapon`.
+`turn_right`, `strafe_left`, `strafe_right`, `fire`, `use_`, `select_weapon`,
+`get_map`.
 
 ### Register it with Claude Code (CLI)
 
@@ -114,6 +115,17 @@ field of view *and* in line of sight, ordered left-to-right. `bearing` is degree
 from where you face (0 = centre, negative = left). Enemies behind you or hidden
 behind walls are **not** reported, and there are no targeting hints: the model
 makes all tactical decisions itself.
+
+**Automap** — send `{"request":"map"}` (or `{"map":true}`) and the device replies
+with the ASCII automap, the same information the in-game automap shows:
+
+```json
+{"valid":true,"cols":64,"rows":32,"units_per_cell":N,"origin_x":..,"origin_y":..,
+ "player":{"col":..,"row":..,"angle":..},"grid":["  ## ", "#  @#", ...]}
+```
+`grid` holds only the walls **already discovered** by exploring (`#`), the player
+(`@`) and blanks for the rest; north is up. No monsters or items — exactly like
+the player's own automap.
 
 ## Notes
 

@@ -90,6 +90,35 @@ static char *build_obs_json(const doom_agent_obs_t *o)
     return out;
 }
 
+static char *build_map_json(const doom_agent_map_t *m)
+{
+    cJSON *r = cJSON_CreateObject();
+    if (r == NULL) {
+        return NULL;
+    }
+    cJSON_AddBoolToObject(r, "valid", m->valid);
+    if (m->valid) {
+        cJSON_AddNumberToObject(r, "cols", m->cols);
+        cJSON_AddNumberToObject(r, "rows", m->rows);
+        cJSON_AddNumberToObject(r, "units_per_cell", m->units_per_cell);
+        cJSON_AddNumberToObject(r, "origin_x", m->origin_x);
+        cJSON_AddNumberToObject(r, "origin_y", m->origin_y);
+        cJSON *p = cJSON_AddObjectToObject(r, "player");
+        if (p) {
+            cJSON_AddNumberToObject(p, "col", m->player_col);
+            cJSON_AddNumberToObject(p, "row", m->player_row);
+            cJSON_AddNumberToObject(p, "angle", m->angle_deg);
+        }
+        cJSON *grid = cJSON_AddArrayToObject(r, "grid");
+        for (int i = 0; grid && i < m->rows; i++) {
+            cJSON_AddItemToArray(grid, cJSON_CreateString(m->grid[i]));
+        }
+    }
+    char *out = cJSON_PrintUnformatted(r);
+    cJSON_Delete(r);
+    return out;
+}
+
 static esp_err_t agent_ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
@@ -124,14 +153,32 @@ static esp_err_t agent_ws_handler(httpd_req_t *req)
         return err;
     }
 
-    doom_agent_action_t action;
-    parse_action((const char *)buf, frame.len, &action);
+    /* A map request {"request":"map"} or {"map":true} returns the ASCII automap;
+     * anything else is an action that advances the game and returns an observation. */
+    bool want_map = false;
+    cJSON *probe = cJSON_ParseWithLength((const char *)buf, frame.len);
+    if (probe != NULL) {
+        const cJSON *req_item = cJSON_GetObjectItemCaseSensitive(probe, "request");
+        const cJSON *map_item = cJSON_GetObjectItemCaseSensitive(probe, "map");
+        want_map = (cJSON_IsString(req_item) && req_item->valuestring &&
+                    strcmp(req_item->valuestring, "map") == 0) || cJSON_IsTrue(map_item);
+        cJSON_Delete(probe);
+    }
+
+    char *json = NULL;
+    if (want_map) {
+        doom_agent_map_t map;
+        doom_agent_get_map(&map);
+        json = build_map_json(&map);
+    } else {
+        doom_agent_action_t action;
+        parse_action((const char *)buf, frame.len, &action);
+        doom_agent_obs_t obs;
+        doom_agent_step(&action, &obs);
+        json = build_obs_json(&obs);
+    }
     free(buf);
 
-    doom_agent_obs_t obs;
-    doom_agent_step(&action, &obs);
-
-    char *json = build_obs_json(&obs);
     if (json != NULL) {
         httpd_ws_frame_t resp = {
             .type = HTTPD_WS_TYPE_TEXT,
