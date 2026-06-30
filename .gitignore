@@ -16,6 +16,12 @@
 # Log files
 *.log
 
+# Python virtualenvs and caches (tools/)
+venv/
+.venv/
+__pycache__/
+*.pyc
+
 # Build artifacts and directories
 **/build/
 build/
