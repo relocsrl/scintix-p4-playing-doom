@@ -49,6 +49,9 @@ def fmt_obs(obs: dict) -> str:
         f"  hp={obs['health']} armor={obs['armor']}  weapon={obs['weapon']} ammo={obs['ammo']}"
         f"  E{obs['episode']}M{obs['map']}",
     ]
+    walls = obs.get("walls", [])
+    if walls:
+        lines.append("  walls (bearing:dist): " + "  ".join(f"{w['bearing']:+d}:{w['dist']}" for w in walls))
     visible = obs.get("visible", [])
     if visible:
         lines.append(f"  in view ({len(visible)}), left-to-right:")

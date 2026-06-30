@@ -25,9 +25,11 @@
 #include "doomstat.h"
 #include "doomdata.h"
 #include "d_items.h"
+#include "m_fixed.h"
 #include "p_local.h"
 #include "r_main.h"
 #include "r_state.h"
+#include "tables.h"
 
 #define DOOM_WAD_PATH "/spiffs/doom1.wad"
 #define DOOM_EVENT_QUEUE_LEN 32
@@ -464,6 +466,48 @@ static const char *weapon_name(weapontype_t w)
     }
 }
 
+/* Wall-distance raycast: P_PathTraverse stops at the first line that would block
+ * movement (one-sided, blocking flag, or an opening too small to pass), like
+ * judging depth in the rendered view. */
+#define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
+static fixed_t s_ray_hit_frac;
+
+static boolean agent_ray_traverse(intercept_t *in)
+{
+    line_t *li = in->d.line;
+    boolean blocking;
+    if (!(li->flags & ML_TWOSIDED) || (li->flags & ML_BLOCKING) ||
+        li->frontsector == NULL || li->backsector == NULL) {
+        blocking = true;
+    } else {
+        fixed_t opentop = li->frontsector->ceilingheight < li->backsector->ceilingheight
+                              ? li->frontsector->ceilingheight : li->backsector->ceilingheight;
+        fixed_t openbottom = li->frontsector->floorheight > li->backsector->floorheight
+                                 ? li->frontsector->floorheight : li->backsector->floorheight;
+        blocking = (opentop - openbottom) < (56 << FRACBITS); /* closed/too low to pass */
+    }
+    if (blocking) {
+        s_ray_hit_frac = in->frac;
+        return false; /* stop at the first obstruction */
+    }
+    return true;
+}
+
+static int agent_cast_ray(mobj_t *pm, int bearing_deg)
+{
+    angle_t a = pm->angle + (angle_t)(((int64_t)bearing_deg * 0x100000000LL) / 360);
+    unsigned fa = a >> ANGLETOFINESHIFT;
+    fixed_t range = AGENT_RAY_RANGE << FRACBITS;
+    fixed_t x2 = pm->x + FixedMul(range, finecosine[fa]);
+    fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
+    s_ray_hit_frac = 0;
+    P_PathTraverse(pm->x, pm->y, x2, y2, PT_ADDLINES, agent_ray_traverse);
+    if (s_ray_hit_frac == 0) {
+        return AGENT_RAY_RANGE; /* clear for at least the scan range */
+    }
+    return (int)(((int64_t)AGENT_RAY_RANGE * s_ray_hit_frac) >> FRACBITS);
+}
+
 /* Capture what the player can currently SEE into an observation. Runs on the
  * Doom task. Only things inside the rendered field of view and in line of sight
  * are reported (no enemies behind/occluded), with no targeting hints — the goal
@@ -528,6 +572,14 @@ static void agent_capture_obs(doom_agent_obs_t *o)
             j--;
         }
         o->visible[j + 1] = t;
+    }
+
+    /* Wall distances fanned across the field of view (depth of the rendered view). */
+    static const int ray_bearings[DOOM_AGENT_NUM_RAYS] = {-45, -30, -15, 0, 15, 30, 45};
+    o->num_rays = DOOM_AGENT_NUM_RAYS;
+    for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
+        o->walls[i].bearing_deg = ray_bearings[i];
+        o->walls[i].dist = agent_cast_ray(pm, ray_bearings[i]);
     }
 }
 

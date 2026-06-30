@@ -84,6 +84,18 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             cJSON_AddNumberToObject(t, "bearing", o->visible[i].bearing_deg);
             cJSON_AddItemToArray(visible, t);
         }
+
+        /* Distance to the nearest wall along rays across the field of view. */
+        cJSON *walls = cJSON_AddArrayToObject(r, "walls");
+        for (int i = 0; walls && i < o->num_rays; i++) {
+            cJSON *w = cJSON_CreateObject();
+            if (!w) {
+                break;
+            }
+            cJSON_AddNumberToObject(w, "bearing", o->walls[i].bearing_deg);
+            cJSON_AddNumberToObject(w, "dist", o->walls[i].dist);
+            cJSON_AddItemToArray(walls, w);
+        }
     }
     char *out = cJSON_PrintUnformatted(r);
     cJSON_Delete(r);

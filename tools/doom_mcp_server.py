@@ -59,7 +59,11 @@ _OBS = (
     "and `visible` — the things on screen right now (inside the field of view AND "
     "in line of sight), ordered left-to-right, each {name, dist (map units), "
     "bearing (degrees from where you face: 0 = centre, negative = left, "
-    "positive = right)}. Anything behind you or hidden behind walls is NOT listed."
+    "positive = right)}. Anything behind you or hidden behind walls is NOT listed. "
+    "Also `walls`: the distance (map units) to the nearest wall along rays across "
+    "your field of view (bearing -45..45, 0 = straight ahead) — like judging depth "
+    "in the view. Use these to gauge how far you can advance and to spot openings: "
+    "a ray with a much larger distance than its neighbours is a passage/door."
 )
 
 

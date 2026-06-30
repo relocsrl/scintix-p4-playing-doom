@@ -32,6 +32,14 @@ typedef struct {
     int  bearing_deg; /* -45..45, relative to player facing (0 = centre of view) */
 } doom_agent_thing_t;
 
+/* Distance to the nearest wall/closed obstruction along a ray, like judging
+ * depth in the rendered 3D view. Rays fan across the field of view only. */
+#define DOOM_AGENT_NUM_RAYS 7
+typedef struct {
+    int bearing_deg;  /* -45..45 relative to facing (0 = straight ahead) */
+    int dist;         /* map units to the first obstruction; clamped to the scan range if clear */
+} doom_agent_ray_t;
+
 typedef struct {
     bool valid;
     int  x, y, z;     /* map units */
@@ -41,6 +49,8 @@ typedef struct {
     int  episode, map;
     int  num_visible;
     doom_agent_thing_t visible[DOOM_AGENT_MAX_VISIBLE];
+    int  num_rays;
+    doom_agent_ray_t walls[DOOM_AGENT_NUM_RAYS];
 } doom_agent_obs_t;
 
 /* ASCII automap: a bounded grid mirroring the player's in-game automap — only

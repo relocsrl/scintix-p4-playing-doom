@@ -107,8 +107,14 @@ your shell PATH/venv:
 ```json
 {"valid":true,"x":..,"y":..,"z":..,"angle":0-359,
  "health":..,"armor":..,"weapon":"shotgun","ammo":..,"episode":..,"map":..,
- "visible":[{"name":"imp","dist":410,"bearing":-12}, ...]}
+ "visible":[{"name":"imp","dist":410,"bearing":-12}, ...],
+ "walls":[{"bearing":-45,"dist":..}, ..., {"bearing":45,"dist":..}]}
 ```
+
+`walls` gives the distance (map units) to the nearest wall/closed obstruction
+along rays fanned across the field of view (the depth of the rendered view) — use
+it to judge how far you can advance and to spot openings (a ray noticeably longer
+than its neighbours is a passage). Rays only cover the FOV, never behind you.
 
 `visible` lists **only what the player can see on screen** — things inside the
 field of view *and* in line of sight, ordered left-to-right. `bearing` is degrees
