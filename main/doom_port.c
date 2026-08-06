@@ -471,37 +471,49 @@ static const char *weapon_name(weapontype_t w)
  * judging depth in the rendered view. */
 #define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
 static fixed_t s_ray_hit_frac;
+static boolean s_ray_hit_is_door; /* hit line is a two-sided line currently too closed to pass */
 
 static boolean agent_ray_traverse(intercept_t *in)
 {
     line_t *li = in->d.line;
     boolean blocking;
+    boolean is_door = false;
     if (!(li->flags & ML_TWOSIDED) || (li->flags & ML_BLOCKING) ||
         li->frontsector == NULL || li->backsector == NULL) {
-        blocking = true;
+        blocking = true; /* one-sided or explicitly blocking = solid wall */
     } else {
         fixed_t opentop = li->frontsector->ceilingheight < li->backsector->ceilingheight
                               ? li->frontsector->ceilingheight : li->backsector->ceilingheight;
         fixed_t openbottom = li->frontsector->floorheight > li->backsector->floorheight
                                  ? li->frontsector->floorheight : li->backsector->floorheight;
         blocking = (opentop - openbottom) < (56 << FRACBITS); /* closed/too low to pass */
+        is_door = blocking; /* a two-sided line, passable in principle, currently shut = a door */
     }
     if (blocking) {
         s_ray_hit_frac = in->frac;
+        s_ray_hit_is_door = is_door;
         return false; /* stop at the first obstruction */
     }
     return true;
 }
 
-static int agent_cast_ray(mobj_t *pm, int bearing_deg)
+static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door)
 {
-    angle_t a = pm->angle + (angle_t)(((int64_t)bearing_deg * 0x100000000LL) / 360);
+    /* bearing_deg is signed with positive = RIGHT of centre. Doom angles grow
+     * counter-clockwise (left), so a right-of-centre ray is at pm->angle MINUS
+     * the bearing. This keeps `walls`/`door_ahead` bearings consistent with the
+     * `visible` bearings and the turn_left/turn_right tools. */
+    angle_t a = pm->angle - (angle_t)(((int64_t)bearing_deg * 0x100000000LL) / 360);
     unsigned fa = a >> ANGLETOFINESHIFT;
     fixed_t range = AGENT_RAY_RANGE << FRACBITS;
     fixed_t x2 = pm->x + FixedMul(range, finecosine[fa]);
     fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
     s_ray_hit_frac = 0;
+    s_ray_hit_is_door = false;
     P_PathTraverse(pm->x, pm->y, x2, y2, PT_ADDLINES, agent_ray_traverse);
+    if (is_door != NULL) {
+        *is_door = s_ray_hit_is_door;
+    }
     if (s_ray_hit_frac == 0) {
         return AGENT_RAY_RANGE; /* clear for at least the scan range */
     }
@@ -525,7 +537,11 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     o->x = pm->x >> FRACBITS;
     o->y = pm->y >> FRACBITS;
     o->z = pm->z >> FRACBITS;
-    o->angle_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+    /* Report facing as a compass heading (0 = north, 90 = east, clockwise) so it
+     * lines up with the north-up automap. Doom's own angle is 0 = east and grows
+     * counter-clockwise, hence (90 - doom) wrapped to 0..359. */
+    int doom_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+    o->angle_deg = (450 - doom_deg) % 360;
     o->health = pl->health;
     o->armor = pl->armorpoints;
     int ammotype = weaponinfo[pl->readyweapon].ammo;
@@ -549,6 +565,10 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         if (bearing > 180) {
             bearing -= 360;
         }
+        /* Doom angles grow counter-clockwise, so a positive rel means the thing is
+         * to the LEFT. Flip it so positive = RIGHT of centre, matching the tools,
+         * the `walls` fan and the automap. */
+        bearing = -bearing;
         if (bearing < -AGENT_FOV_DEG || bearing > AGENT_FOV_DEG) {
             continue;
         }
@@ -574,12 +594,33 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         o->visible[j + 1] = t;
     }
 
-    /* Wall distances fanned across the field of view (depth of the rendered view). */
-    static const int ray_bearings[DOOM_AGENT_NUM_RAYS] = {-45, -30, -15, 0, 15, 30, 45};
+    /* Wall distances fanned evenly across the ±AGENT_FOV_DEG field of view (the
+     * depth of the rendered view). A dense fan (many rays) approximates the
+     * continuous rendered image, so the agent can resolve openings and wall edges
+     * a coarse fan would miss. Centred on 0° (straight ahead); C integer division
+     * truncates toward zero, keeping the fan symmetric. */
     o->num_rays = DOOM_AGENT_NUM_RAYS;
+    int ray_mid = (DOOM_AGENT_NUM_RAYS - 1) / 2;
+    int best_door_absb = 1000; /* most-central door ray seen so far, by |bearing| */
     for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
-        o->walls[i].bearing_deg = ray_bearings[i];
-        o->walls[i].dist = agent_cast_ray(pm, ray_bearings[i]);
+        int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
+        boolean is_door = false;
+        int dist = agent_cast_ray(pm, bearing, &is_door);
+        o->walls[i].bearing_deg = bearing;
+        o->walls[i].dist = dist;
+        /* Report the closed door/passage in view so the agent can tell a re-shut
+         * door (press use again) from a solid wall (go around). A door usually
+         * spans several rays; report the most central one so bearing points at the
+         * door itself, not its edge. */
+        if (is_door) {
+            int absb = bearing < 0 ? -bearing : bearing;
+            if (absb < best_door_absb) {
+                best_door_absb = absb;
+                o->door_ahead_valid = true;
+                o->door_ahead_bearing = bearing;
+                o->door_ahead_dist = dist;
+            }
+        }
     }
 }
 
@@ -622,7 +663,9 @@ static void agent_render_map(doom_agent_map_t *m)
         return;
     }
     m->valid = true;
-    m->angle_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+    /* Compass heading (0 = north, clockwise) to match this north-up grid and the
+     * observation's angle. */
+    m->angle_deg = (450 - (int)(((uint64_t)pm->angle * 360u) >> 32)) % 360;
 
     const int px = pm->x >> FRACBITS;
     const int py = pm->y >> FRACBITS;
@@ -749,8 +792,31 @@ static void doom_task(void *arg)
                 if (s_agent_req_kind == 1) {
                     agent_render_map(&s_agent_map);
                 } else {
+                    player_t *apl = &players[consoleplayer];
+                    fixed_t bx = apl->mo ? apl->mo->x : 0;
+                    fixed_t by = apl->mo ? apl->mo->y : 0;
                     agent_apply_and_tick(&s_agent_action);
                     agent_capture_obs(&s_agent_obs);
+                    /* A move/strafe was requested but the player made no progress
+                     * along the axis it asked for => ran into something (a shut
+                     * door, a wall). Project the displacement onto the facing and
+                     * side axes rather than using raw distance, so sliding sideways
+                     * along an angled wall still counts as blocked-forward. */
+                    if ((s_agent_action.move != 0 || s_agent_action.strafe != 0) &&
+                        s_agent_obs.valid && apl->mo != NULL) {
+                        int dx = (apl->mo->x - bx) >> FRACBITS;
+                        int dy = (apl->mo->y - by) >> FRACBITS;
+                        unsigned fa = apl->mo->angle >> ANGLETOFINESHIFT;
+                        int fwd = (int)(((int64_t)dx * finecosine[fa] +
+                                         (int64_t)dy * finesine[fa]) >> FRACBITS);
+                        int side = (int)(((int64_t)dx * finesine[fa] -
+                                          (int64_t)dy * finecosine[fa]) >> FRACBITS);
+                        boolean blk = true; /* blocked unless a requested axis advanced */
+                        if (s_agent_action.move > 0 && fwd >= 16) blk = false;
+                        if (s_agent_action.move < 0 && fwd <= -16) blk = false;
+                        if (s_agent_action.strafe != 0 && (side >= 16 || side <= -16)) blk = false;
+                        s_agent_obs.blocked = blk;
+                    }
                 }
                 xSemaphoreGive(s_agent_step_done);
             } else {

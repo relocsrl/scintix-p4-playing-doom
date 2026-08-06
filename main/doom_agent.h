@@ -29,21 +29,21 @@ typedef struct {
 typedef struct {
     char name[16];    /* "zombieman", "imp", "barrel", ... */
     int  dist;        /* map units */
-    int  bearing_deg; /* -45..45, relative to player facing (0 = centre of view) */
+    int  bearing_deg; /* -45..45 from facing: 0 = centre, negative = left, positive = right */
 } doom_agent_thing_t;
 
 /* Distance to the nearest wall/closed obstruction along a ray, like judging
  * depth in the rendered 3D view. Rays fan across the field of view only. */
-#define DOOM_AGENT_NUM_RAYS 7
+#define DOOM_AGENT_NUM_RAYS 51
 typedef struct {
-    int bearing_deg;  /* -45..45 relative to facing (0 = straight ahead) */
+    int bearing_deg;  /* -45..45 from facing: 0 = ahead, negative = left, positive = right */
     int dist;         /* map units to the first obstruction; clamped to the scan range if clear */
 } doom_agent_ray_t;
 
 typedef struct {
     bool valid;
     int  x, y, z;     /* map units */
-    int  angle_deg;   /* 0..359, facing */
+    int  angle_deg;   /* 0..359 compass heading: 0 = north, 90 = east, clockwise */
     int  health, armor, ammo;
     char weapon[16];  /* current weapon name */
     int  episode, map;
@@ -51,6 +51,16 @@ typedef struct {
     doom_agent_thing_t visible[DOOM_AGENT_MAX_VISIBLE];
     int  num_rays;
     doom_agent_ray_t walls[DOOM_AGENT_NUM_RAYS];
+    /* An openable-but-currently-closed obstruction in view (a door / closed
+     * passage), distinct from a solid wall; bearing points at the door itself
+     * (most central ray), not its edge. Tells the agent to press use again when a
+     * door has re-shut. door_ahead_valid = false when none is in view. */
+    bool door_ahead_valid;
+    int  door_ahead_bearing; /* -45..45 relative to facing */
+    int  door_ahead_dist;    /* map units */
+    /* Set after a movement action when the player barely moved (ran into
+     * something). false for pure observe/turn steps. */
+    bool blocked;
 } doom_agent_obs_t;
 
 /* ASCII automap: a bounded grid mirroring the player's in-game automap — only
@@ -66,7 +76,7 @@ typedef struct {
     int  units_per_cell;       /* map units per character cell */
     int  origin_x, origin_y;   /* map coords of the top-left cell [0][0] */
     int  player_col, player_row;
-    int  angle_deg;
+    int  angle_deg;            /* 0..359 compass heading: 0 = north (up), clockwise */
     char grid[DOOM_AGENT_MAP_ROWS][DOOM_AGENT_MAP_COLS + 1]; /* NUL-terminated rows */
 } doom_agent_map_t;
 

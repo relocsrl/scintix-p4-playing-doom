@@ -108,19 +108,31 @@ your shell PATH/venv:
 {"valid":true,"x":..,"y":..,"z":..,"angle":0-359,
  "health":..,"armor":..,"weapon":"shotgun","ammo":..,"episode":..,"map":..,
  "visible":[{"name":"imp","dist":410,"bearing":-12}, ...],
- "walls":[{"bearing":-45,"dist":..}, ..., {"bearing":45,"dist":..}]}
+ "walls":[{"bearing":-45,"dist":..}, ..., {"bearing":45,"dist":..}],
+ "door_ahead":{"bearing":..,"dist":..},"blocked":false}
 ```
+
+`angle` is a **compass heading**: 0 = north, 90 = east, clockwise — the same frame
+as the north-up automap.
+
+All `bearing` values (in `visible`, `walls`, `door_ahead`) are degrees from where
+you face: **0 = centre, negative = left, positive = right** — so `turn_right`
+brings a positive-bearing thing toward the centre and `turn_left` a negative one.
 
 `walls` gives the distance (map units) to the nearest wall/closed obstruction
 along rays fanned across the field of view (the depth of the rendered view) — use
 it to judge how far you can advance and to spot openings (a ray noticeably longer
 than its neighbours is a passage). Rays only cover the FOV, never behind you.
 
+`door_ahead` appears **only** when a closed door/passage is in view (nearest one,
+as `{bearing, dist}`): press use to open it; if it reappears after you opened it
+the door re-closed, so press use again instead of walking into it. `blocked` is
+true when your last move barely shifted you (you ran into a wall or a shut door).
+
 `visible` lists **only what the player can see on screen** — things inside the
-field of view *and* in line of sight, ordered left-to-right. `bearing` is degrees
-from where you face (0 = centre, negative = left). Enemies behind you or hidden
-behind walls are **not** reported, and there are no targeting hints: the model
-makes all tactical decisions itself.
+field of view *and* in line of sight, ordered left-to-right. Enemies behind you or
+hidden behind walls are **not** reported, and there are no targeting hints: the
+model makes all tactical decisions itself.
 
 **Automap** — send `{"request":"map"}` (or `{"map":true}`) and the device replies
 with the ASCII automap, the same information the in-game automap shows:
@@ -130,8 +142,9 @@ with the ASCII automap, the same information the in-game automap shows:
  "player":{"col":..,"row":..,"angle":..},"grid":["  ## ", "#  @#", ...]}
 ```
 `grid` holds only the walls **already discovered** by exploring (`#`), the player
-(`@`) and blanks for the rest; north is up. No monsters or items — exactly like
-the player's own automap.
+(`@`) and blanks for the rest; north is up and `player.angle` is a compass heading
+(0 = north, clockwise). No monsters or items — exactly like the player's own
+automap.
 
 ## Notes
 

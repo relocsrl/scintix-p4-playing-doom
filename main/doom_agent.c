@@ -96,6 +96,18 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             cJSON_AddNumberToObject(w, "dist", o->walls[i].dist);
             cJSON_AddItemToArray(walls, w);
         }
+
+        /* Nearest closed door / passage in view (absent when none). Lets the agent
+         * tell a re-shut door (press use again) from a solid wall (go around). */
+        if (o->door_ahead_valid) {
+            cJSON *d = cJSON_AddObjectToObject(r, "door_ahead");
+            if (d) {
+                cJSON_AddNumberToObject(d, "bearing", o->door_ahead_bearing);
+                cJSON_AddNumberToObject(d, "dist", o->door_ahead_dist);
+            }
+        }
+        /* True when a requested move barely shifted the player (ran into something). */
+        cJSON_AddBoolToObject(r, "blocked", o->blocked);
     }
     char *out = cJSON_PrintUnformatted(r);
     cJSON_Delete(r);
