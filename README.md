@@ -7,6 +7,16 @@ hardware-scaled to ~30 FPS by the P4's PPA); a small WebSocket "lockstep" API an
 MCP server expose the running game so a large language model can play it, seeing only
 what a player sees on screen.
 
+## The board
+
+The SCINTIX P4 (RM-CMP4) is a compact ESP32-P4 compute module in the Raspberry Pi
+CM4/CM5 form factor — instant boot, hard real-time, low power, reusing the CM carrier
+ecosystem.
+
+> 🚀 **The SCINTIX P4 is crowdfunding on
+> [Crowd Supply](https://www.crowdsupply.com/reloc/scintix-p4)** — see also the
+> [product page @ RELOC](https://www.reloc.it/products/rm-cmp4/).
+
 [![Claude Sonnet plays DOOM on an ESP32-P4](https://img.youtube.com/vi/z6UT_tOvC2Q/maxresdefault.jpg)](https://youtu.be/z6UT_tOvC2Q)
 
 ▶️ **[Watch the demo](https://youtu.be/z6UT_tOvC2Q)** — Claude Sonnet playing DOOM on the board.
@@ -153,16 +163,6 @@ flash takes a while.
 - Connect, enter your Wi-Fi SSID and password, and save.
 - Use the serial monitor or a network scanner to find the device IP, then open it in a
   browser for the settings page — or point the MCP server at `ws://<ip>/agent`.
-
-## The board
-
-The SCINTIX P4 (RM-CMP4) is a compact ESP32-P4 compute module in the Raspberry Pi
-CM4/CM5 form factor — instant boot, hard real-time, low power, reusing the CM carrier
-ecosystem.
-
-> 🚀 **The SCINTIX P4 is crowdfunding on
-> [Crowd Supply](https://www.crowdsupply.com/reloc/scintix-p4)** — see also the
-> [product page @ RELOC](https://www.reloc.it/products/rm-cmp4/).
 
 ## Links & references
 
