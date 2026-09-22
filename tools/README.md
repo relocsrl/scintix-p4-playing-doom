@@ -1,14 +1,20 @@
 # SCINTIX P4 DOOM — agent tools
 
-Tools to drive DOOM running on the SCINTIX P4 from a computer, and to let an LLM
-play it via MCP. They talk to the firmware's **`/agent` WebSocket** (the
-`ai-agent-api` branch), which runs the game in **lockstep**: you send an action,
-the game advances a few tics, and you get back a structured observation.
+Tools to drive DOOM running on the SCINTIX P4 from a computer, and to let an AI
+play it — an LLM via MCP, or TypeSafe's **Jev** (a fast "System One" model) at
+several decisions per second, alone or supervised by an LLM. They talk to the
+firmware's **`/agent` WebSocket** (the `ai-agent-api` branch), which runs the game
+in **lockstep**: you send an action, the game advances a few tics, and you get
+back a structured observation.
 
 | File | What it is |
 |------|------------|
 | `agent_client.py` | Test client / interactive REPL to drive the game by hand |
-| `doom_mcp_server.py` | MCP server exposing the game as tools for an LLM |
+| `doom_mcp_server.py` | MCP server exposing the game as tools for an LLM (slow, deliberate play) |
+| `doom_jev_agent.py` | **Jev plays** — level 1 (Jev alone) or level 2 (Jev + LLM supervisor) |
+| `doom_agent_sim.py` | Simulator of the device's `/agent` API, to develop/demo without the board |
+| `tests/mock_servers.py` | Fake Jev + fake LLM endpoints: run the whole pipeline with no API keys |
+| `firmware-realtime-agent-mode.patch` | Optional firmware patch: free-running `/agent` (`"hold": true`) for real-time play |
 | `requirements.txt` | Python deps (`websockets`, `mcp`) |
 
 ## 0. Prerequisites
@@ -92,6 +98,174 @@ your shell PATH/venv:
 }
 ```
 
+## 3. Let Jev play — `doom_jev_agent.py` (System One, fast)
+
+[Jev](https://typesafe.ai) is TypeSafe AI's *System One* model: instead of prose it
+returns **typed, calibrated decisions** (a choice with probabilities, a yes/no
+probability) in ~100–300 ms. `doom_jev_agent.py` feeds it the `/agent` observation
+and lets it drive the marine several times a second. Two levels of control:
+
+| Mode | What runs | When to use |
+|------|-----------|-------------|
+| `--mode jev` (default) | **Level 1 — Jev alone.** Every step: observation → compact JSON state → one Jev call with two questions: *which macro* (Choice over 14 movement/interaction macros) and *hold fire?* (Noul). | Pure reflexes, fastest, cheapest. |
+| `--mode supervised` | **Level 2 — Jev + LLM supervisor.** Same reflex loop, plus a slow *System Two* (Claude by default; any OpenAI-compatible endpoint; or a built-in `dry` heuristic) that every ~10 s (or when stuck / hurt / new level / no progress) reads the **automap**, the trajectory and the stats and rewrites the **intent**: goal, target compass heading, fire policy, preferred weapon. The intent is injected into Jev's state as `commander` (with a `turn_hint`); Jev keeps taking the fast decisions. | Exploration and strategy: the reflex layer has no memory of the map. |
+
+### Setup
+
+Same venv as §0 — only `websockets` is needed (Jev and the supervisor are called
+over plain HTTPS with the standard library).
+
+```powershell
+# in tools/, venv active (see §0)
+$env:TYPESAFE_API_KEY  = "..."      # Jev (TypeSafe API console)
+$env:ANTHROPIC_API_KEY = "..."      # only for --mode supervised with --supervisor anthropic (default)
+$env:OPENAI_API_KEY    = "..."      # only for --supervisor openai (or any OpenAI-compatible server)
+```
+(`export VAR=...` on Linux/macOS.) Stop the MCP server if it is running — the
+device accepts **one** agent connection — and get the game **into a level**.
+
+### Preflight: `--check`
+
+```bash
+python doom_jev_agent.py <device-ip> --check                        # Jev key + latency + board
+python doom_jev_agent.py <device-ip> --mode supervised --check      # + the supervisor LLM
+```
+It sends three sample decisions to Jev (latency, tokens per call, cost per hour),
+one sample plan to the supervisor, opens `/agent` once, prints what it found and
+exits. A bad key (401/403) or a rejected request (4xx) is reported here, before the
+game starts; without the board the cloud checks still run.
+
+### Run
+
+```bash
+python doom_jev_agent.py <device-ip>                          # level 1: Jev alone
+python doom_jev_agent.py <device-ip> --mode supervised        # level 2: Jev + Claude (claude-sonnet-5)
+python doom_jev_agent.py <device-ip> --mode supervised --supervisor openai --supervisor-model <model> \
+                                     --supervisor-base-url https://api.openai.com/v1   # or any compatible server
+python doom_jev_agent.py <device-ip> --mode supervised --supervisor dry   # heuristic "frontier" planner, no LLM key
+python doom_jev_agent.py <device-ip> --jev dry                # no Jev key: transparent local policy (same loop)
+python doom_jev_agent.py <device-ip> --log run.jsonl --steps 500 --show-map-every 30
+```
+
+The run also takes care of the game around the reflexes: when the marine **dies**
+it waits a second and presses USE (the level restarts); when **nothing changes**
+for `--frozen-after 8` steps whatever it presses — the end-of-level stats screen —
+it presses USE to move on (and tells you to press Esc on the keyboard if a menu is
+open); when the **Wi-Fi link drops** it reconnects (up to 10 attempts) and resumes.
+
+Every step prints one telemetry line:
+
+```
+[  16]  123ms hp=100 ammo= 48 hd= 90 | use              c=0.60 fire=0.05  | ahead=  19 en=0 door=19@+0 blk=0
+[  61]  122ms hp=100 ammo= 17 hd= 46 | forward          c=0.83 fire=0.90* | ahead= 782 en=1(imp 245@+7) door=- blk=0 anti-osc
+  [supervisor stuck, 2.1s] goal: Head east along the corridor and open the door at its end | heading 90 | fire normal | weapon 3 | ...
+```
+`c` = Jev's confidence on the macro, `fire` = P(hold fire) (`*` = fired), `ahead` =
+nearest wall straight ahead, `en` = enemies in view, `door` = `door_ahead`
+dist@bearing, `blk` = consecutive blocked moves. Trailing flags mark anything that
+was **not** Jev's own decision: `FALLBACK` (Jev unreachable → local policy, retried
+with backoff 1→15 s; a 401/403/4xx stops the retries), `sampled` (low confidence →
+sampled from Jev's probabilities), `unstick` / `anti-osc` / `approach-door` /
+`door-wait` (the deterministic safety nets, see below), `respawn` / `unfreeze`
+(death and end-of-level handling). `--log file.jsonl` records the full state sent, Jev's answers,
+the action and the observation for every step, plus every supervisor plan. Ctrl+C
+prints a summary (steps, game time, latency, tokens/cost, deaths, levels played,
+plans) and the device resumes real-time play.
+
+### What Jev sees and decides
+
+The 51-ray depth fan is collapsed into **7 sectors** (`min/max` wall distance
+each) plus detected **openings** (rays much longer than their neighbours), the
+`visible` list, `door_ahead`, `blocked`, a short **memory** (last 8 macros,
+consecutive blocked count), a 9×25 **automap window** around the player, and the
+`commander` intent. Each option's *criteria* text says **when** that macro is the
+right one, e.g. `use`: "USE only reaches ~64 units, right when door_ahead is very
+close (dist < 70) and roughly centred". Macros: `forward`, `forward_long`,
+`forward_left/right`, `turn_left/right` (~30°), `turn_left/right_small` (~9°),
+`turn_around`, `back`, `strafe_left/right`, `use`, `wait`.
+
+### Safety nets (deterministic, always flagged)
+
+They exist because Doom has a few mechanics a reflex model cannot learn from one
+frame: **USE reaches only 64 units** (a `use` on a far door becomes a step toward
+it); **USE toggles a door** — pressing it again while it is still rising sends it
+back down (after a `use`, further `use` become `wait` for `--use-cooldown` 30
+tics); **dithering** left/right with nothing in view is broken after 4
+alternations; **N consecutive blocked moves** (`--unstick-after 4`) trigger a turn
+toward the most open direction. `--no-heuristics` disables them all (pure Jev);
+`--policy sample` always samples from Jev's distribution instead of taking the
+argmax (more exploration); `--min-confidence` sets when `mixed` (default) samples.
+
+### Pacing: lockstep vs. real time
+
+The firmware's `/agent` is **lockstep**: the game is frozen while we think. A step
+is `Jev latency (~150–300 ms) + tics × 28.6 ms` of device time, so with the default
+macros (8 tics ≈ 0.23 s) the game runs at roughly **50–70 % of real time**, 2–3
+decisions/s, and the marine moves in small bursts — much smoother than an LLM over
+MCP (seconds per step), not yet a continuous player. One subtlety handled for you:
+after our pause the device's first tick runs up to ~5 buffered game tics with the
+new keys already held (vanilla Doom sync), so the agent estimates that catch-up
+from how long it paused (up to 4 extra tics after a ≥150 ms pause, 0 after a very
+short one; `--catchup N` forces it) and subtracts it from each macro, so turns land
+where the macro says. Jev calls time out after `--jev-timeout 2` s, well under the
+board's 5 s agent watchdog (past it the board would resume local play until the
+next request).
+
+**Free-running mode (`--realtime`).** With the small firmware patch in
+`tools/firmware-realtime-agent-mode.patch` (files `main/doom_agent.[ch]`,
+`main/doom_port.c`; review it, `git apply` from the repo root, `idf.py build flash`)
+the action accepts `"hold": true`: the game **never pauses**, each decision just
+replaces the keys being held and is answered at once, and `tics` becomes the
+auto-release timeout (a vanished controller never leaves the marine running into a
+wall). The agent then runs at Jev's pace — **~5–8 decisions/s at 100 % game speed**
+in the simulator with a 130 ms model latency — and turns/moves last exactly as long
+as the model keeps choosing them (or the macro's duration if the next decision is
+late). If the board still runs the unpatched firmware, the agent notices (replies
+as slow as lockstep) and says so; it keeps working, in lockstep. The simulator already supports it:
+
+```bash
+python doom_jev_agent.py <device-ip> --realtime                       # after flashing the patch
+python doom_jev_agent.py localhost --port 8765 --jev dry --realtime   # against the simulator
+```
+The patch builds cleanly with ESP-IDF v5.5.4 for esp32p4 (same sdkconfig and
+components as this repo) but has **not yet run on the board** — treat it as a
+reviewed draft. Undo with `git checkout -- main/doom_agent.h main/doom_agent.c main/doom_port.c`.
+
+### Cost
+
+A step is ~1.5 k input tokens (state + questions); at 2–3 steps/s (lockstep) that
+is about **$0.5–0.7 per hour** at $0.042 / Mtok (output is free), ~$1.6/h at 7
+steps/s in realtime mode; `--check` prints the figure for your actual token count. The supervisor adds one
+LLM call every ~10 s (~3 k tokens each).
+
+## 4. No board handy? `doom_agent_sim.py`
+
+A simulator of the firmware's `/agent` API, so the agents can be developed and
+demoed without hardware: a two-room 2D world with a corridor, a **door** that opens
+on `use` and re-closes (Doom semantics, including the USE toggle), a couple of
+imps that walk toward you and bite, a barrel, an **exit** at the end of the
+dead-end spur north of the second room (→ stats screen until USE → E1M2), death
+(USE restarts the level); Doom-like movement (momentum, friction, slow/fast turn,
+the board's lockstep catch-up), a 51-ray depth fan, `visible` in FOV + line of
+sight, `door_ahead`, `blocked`, and the discovered-walls automap — same JSON as the
+device, including the realtime `hold` mode.
+
+```bash
+python doom_agent_sim.py                      # ws://localhost:8765/agent (resets on each connect)
+python doom_agent_sim.py --realtime -v        # ~28.6 ms per tic like the board, verbose
+python doom_agent_sim.py --spawn 1964,1150,0  # scenario: start just south of the exit, facing it
+python doom_agent_sim.py --spawn 2200,245,180 --hp 5   # scenario: next to an imp, nearly dead
+python doom_jev_agent.py localhost --port 8765 --jev dry --steps 200
+python doom_mcp_server.py                     # with DOOM_WS_URL=ws://localhost:8765/agent
+python agent_client.py localhost --port 8765 --repl
+```
+
+`tests/mock_servers.py` adds a fake Jev endpoint (validates the request shape,
+answers with the real response schema, injects a 429 now and then) and a fake LLM
+(Anthropic Messages + OpenAI Chat), so the **whole two-level pipeline runs with no
+API keys** — the docstring has the three commands (ports 8899/8898, or pass
+two ports).
+
 ## Protocol (for reference)
 
 **Action** (client → device), all fields optional:
@@ -101,6 +275,8 @@ your shell PATH/venv:
  "fire":true,"use":true,"weapon":1-7,"tics":N}
 ```
 `tics` (default 7) = game tics to advance this step (35 tics ≈ 1 second).
+With the free-running firmware patch, `"hold": true` keeps the keys held and the
+game running until the next action (then `tics` = auto-release timeout, default 35).
 
 **Observation** (device → client):
 
@@ -152,3 +328,9 @@ automap.
 - While an agent is connected the game is **paused between steps** (the screen
   freezes on the last frame). Disconnect and it resumes real-time play
   (keyboard/gamepad).
+- After a pause the device's first tick catches up to ~5 buffered game tics with
+  the new keys held (vanilla Doom sync), so a step really advances about
+  `tics + 4`; `doom_jev_agent.py` compensates (`--catchup`).
+- Doom's USE reaches 64 units and **toggles** a door (a second press while it is
+  rising sends it back down); `door_ahead` stays present until the opening is
+  56 units high.
