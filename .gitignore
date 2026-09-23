@@ -16,6 +16,15 @@
 # Log files
 *.log
 
+# Agent run logs / scratch outputs (tools/)
+tools/*.jsonl
+
+# Python virtualenvs and caches (tools/)
+venv/
+.venv/
+__pycache__/
+*.pyc
+
 # Build artifacts and directories
 **/build/
 build/

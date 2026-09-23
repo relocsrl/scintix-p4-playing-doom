@@ -1,0 +1,25 @@
+menu "SCINTIX P4 board"
+
+config SCINTIX_BOARD_REV_1_2
+    bool "Board rev 1.2: enable USB Type-A 5V via a GPIO"
+    default y
+    help
+        SCINTIX P4 board revision 1.2 wires an ESP32-P4 GPIO to the CM4/CM5 IO
+        board's USB Type-A (host) 5V power switch. The firmware drives it high at
+        boot so the USB Type-A port is powered, which is required for bus-powered
+        USB peripherals such as a keyboard.
+
+        Earlier rev 1.1 boards (same ESP32-P4 chip rev 3.1/3.2) do not connect this
+        pin to the CMx expansion connector, so this can be turned off there — driving
+        the GPIO on a rev 1.1 board is harmless but has no effect.
+
+config SCINTIX_USB_A_PWR_EN_GPIO
+    int "GPIO that enables the USB Type-A 5V switch"
+    depends on SCINTIX_BOARD_REV_1_2
+    default 23
+    range 0 56
+    help
+        The ESP32-P4 GPIO driven high at boot to enable the CM IO board's USB
+        Type-A 5V power switch. GPIO23 on SCINTIX P4 rev 1.2.
+
+endmenu

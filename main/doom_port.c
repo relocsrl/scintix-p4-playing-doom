@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -13,9 +14,22 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
+#include "doom_agent.h"
+
+/* Doom engine internals, for the agent's state capture. The doomgeneric
+ * component exports its src/ directory as a public include dir. */
+#include "doomstat.h"
+#include "doomdata.h"
+#include "d_items.h"
+#include "m_fixed.h"
+#include "p_local.h"
+#include "r_main.h"
+#include "r_state.h"
+#include "tables.h"
 
 #define DOOM_WAD_PATH "/spiffs/doom1.wad"
 #define DOOM_EVENT_QUEUE_LEN 32
@@ -35,6 +49,32 @@ static uint32_t s_last_gamepad_sequence;
 static uint32_t s_last_keyboard_sequence;
 static usb_keyboard_state_t s_kbd_prev;
 static bool s_spiffs_mounted;
+
+/* Agent (lockstep) bridge. The WebSocket task hands an action to the Doom task
+ * via s_agent_step_req, waits on s_agent_step_done, then reads s_agent_obs. */
+static SemaphoreHandle_t s_agent_step_req;
+static SemaphoreHandle_t s_agent_step_done;
+static doom_agent_action_t s_agent_action;
+static doom_agent_obs_t s_agent_obs;
+static doom_agent_map_t s_agent_map;
+static volatile int s_agent_req_kind; /* 0 = step+observe, 1 = render map */
+static volatile bool s_agent_active;
+static volatile bool s_doom_ready;
+static int s_agent_idle_ms;
+
+/* Realtime (free-running) agent mode: the keys of the last action stay held while
+ * the game keeps ticking; each request swaps them and is answered immediately.
+ * All of this runs on the Doom task except the two flags the WebSocket task sets. */
+static volatile bool s_agent_realtime;        /* current mode while an agent is active */
+static volatile bool s_agent_release_pending; /* WebSocket task asks: drop the held keys */
+static unsigned char s_agent_held[8];
+static int s_agent_held_n;
+static int s_agent_hold_until_tic;            /* gametic at which held keys auto-release */
+static int64_t s_agent_last_req_us;           /* for the idle watchdog in realtime mode */
+static fixed_t s_agent_rt_x, s_agent_rt_y;    /* player position at the previous request */
+static angle_t s_agent_rt_angle;
+static int s_agent_rt_tic;                    /* gametic at the previous request */
+static doom_agent_action_t s_agent_rt_prev;   /* the action that was held until this request */
 
 enum {
     DOOM_KEY_UP = 1U << 0,
@@ -336,6 +376,514 @@ static void print_doom_banner(void)
            "         SCINTIX P4 — rip and tear!\n\n");
 }
 
+/* The set of Doom keys an agent action holds down (movement, fire, use and the
+ * weapon-select digit). `keys` must have room for 8. */
+static int agent_keys_for_action(const doom_agent_action_t *a, unsigned char *keys)
+{
+    int n = 0;
+    if (a->move > 0) {
+        keys[n++] = KEY_UPARROW;
+    } else if (a->move < 0) {
+        keys[n++] = KEY_DOWNARROW;
+    }
+    if (a->turn < 0) {
+        keys[n++] = KEY_LEFTARROW;
+    } else if (a->turn > 0) {
+        keys[n++] = KEY_RIGHTARROW;
+    }
+    if (a->strafe < 0) {
+        keys[n++] = KEY_STRAFE_L;
+    } else if (a->strafe > 0) {
+        keys[n++] = KEY_STRAFE_R;
+    }
+    if (a->fire) {
+        keys[n++] = KEY_FIRE;
+    }
+    if (a->use) {
+        keys[n++] = KEY_USE;
+    }
+    if (a->weapon >= 1 && a->weapon <= 7) {
+        keys[n++] = (unsigned char)('0' + a->weapon);
+    }
+    return n;
+}
+
+/* Inject the agent's action as held keys, advance the requested tics, then
+ * release. Runs on the Doom task. A final tick is always run so the key
+ * releases are processed and the captured frame is current. */
+static void agent_apply_and_tick(const doom_agent_action_t *a)
+{
+    int tics = a->tics;
+    if (tics < 0) {
+        tics = 0;
+    }
+    if (tics > 60) {
+        tics = 60;
+    }
+
+    unsigned char held[8];
+    int n = agent_keys_for_action(a, held);
+
+    for (int i = 0; i < n; i++) {
+        queue_key_event(1, held[i]);
+    }
+    for (int i = 0; i < tics; i++) {
+        doomgeneric_Tick();
+    }
+    for (int i = 0; i < n; i++) {
+        queue_key_event(0, held[i]);
+    }
+    doomgeneric_Tick(); /* flush the key releases, refresh the frame */
+}
+
+/* --- realtime mode helpers (Doom task only) --------------------------------- */
+
+static void agent_capture_obs(doom_agent_obs_t *o); /* defined below */
+
+static void agent_release_held(void)
+{
+    for (int i = 0; i < s_agent_held_n; i++) {
+        queue_key_event(0, s_agent_held[i]);
+    }
+    s_agent_held_n = 0;
+}
+
+/* Swap the held key set for the new action's: release what is no longer held,
+ * press what is new, keep the rest down (no spurious release/press, so a held
+ * FIRE keeps its refire rhythm and USE is not re-triggered). */
+static void agent_realtime_apply(const doom_agent_action_t *a)
+{
+    unsigned char next[8];
+    int n = agent_keys_for_action(a, next);
+
+    for (int i = 0; i < s_agent_held_n; i++) {
+        bool still = false;
+        for (int j = 0; j < n; j++) {
+            if (next[j] == s_agent_held[i]) {
+                still = true;
+                break;
+            }
+        }
+        if (!still) {
+            queue_key_event(0, s_agent_held[i]);
+        }
+    }
+    for (int j = 0; j < n; j++) {
+        bool was = false;
+        for (int i = 0; i < s_agent_held_n; i++) {
+            if (s_agent_held[i] == next[j]) {
+                was = true;
+                break;
+            }
+        }
+        if (!was) {
+            queue_key_event(1, next[j]);
+        }
+    }
+    memcpy(s_agent_held, next, sizeof(next));
+    s_agent_held_n = n;
+
+    int hold_tics = a->tics;
+    if (hold_tics < 1) {
+        hold_tics = 1;
+    }
+    if (hold_tics > 175) { /* 5 s: the longest a controller may go quiet while we keep moving */
+        hold_tics = 175;
+    }
+    s_agent_hold_until_tic = gametic + hold_tics;
+}
+
+/* `blocked` for realtime mode: did the player make progress along the axis the
+ * PREVIOUS action asked for, between the previous request and this one? Same
+ * projection as the lockstep path, but requests come only ~5 tics apart and a
+ * marine starting from rest covers just 0.78*n*(n+1)/2 units in n tics, so the
+ * threshold scales with the elapsed tics (n*n/3, clamped 3..16) instead of a
+ * flat 16. */
+static bool agent_realtime_blocked(const doom_agent_action_t *prev, mobj_t *pm)
+{
+    if (pm == NULL || (prev->move == 0 && prev->strafe == 0)) {
+        return false;
+    }
+    int elapsed = gametic - s_agent_rt_tic;
+    int thr = (elapsed * elapsed) / 3;
+    if (thr < 3) thr = 3;
+    if (thr > 16) thr = 16;
+    int dx = (pm->x - s_agent_rt_x) >> FRACBITS;
+    int dy = (pm->y - s_agent_rt_y) >> FRACBITS;
+    unsigned fa = s_agent_rt_angle >> ANGLETOFINESHIFT;
+    int fwd = (int)(((int64_t)dx * finecosine[fa] + (int64_t)dy * finesine[fa]) >> FRACBITS);
+    int side = (int)(((int64_t)dx * finesine[fa] - (int64_t)dy * finecosine[fa]) >> FRACBITS);
+    bool blk = true;
+    if (prev->move > 0 && fwd >= thr) blk = false;
+    if (prev->move < 0 && fwd <= -thr) blk = false;
+    if (prev->strafe != 0 && (side >= thr || side <= -thr)) blk = false;
+    return blk;
+}
+
+static void agent_realtime_step(const doom_agent_action_t *a)
+{
+    player_t *pl = &players[consoleplayer];
+    bool prev_blocked = agent_realtime_blocked(&s_agent_rt_prev, pl->mo);
+
+    agent_realtime_apply(a);
+    doomgeneric_Tick(); /* one frame so the new keys are in the ticcmd; the game is running anyway */
+    agent_capture_obs(&s_agent_obs);
+    if (s_agent_obs.valid) {
+        s_agent_obs.blocked = prev_blocked;
+    }
+
+    if (pl->mo != NULL) {
+        s_agent_rt_x = pl->mo->x;
+        s_agent_rt_y = pl->mo->y;
+        s_agent_rt_angle = pl->mo->angle;
+    }
+    s_agent_rt_tic = gametic;
+    s_agent_rt_prev = *a;
+}
+
+/* Half of Doom's ~90-degree horizontal field of view: things outside this cone
+ * are off-screen, so the agent shouldn't know about them. */
+#define AGENT_FOV_DEG 45
+
+static const char *name_for_type(mobjtype_t type)
+{
+    switch (type) {
+    case MT_PLAYER:    return "player";
+    case MT_POSSESSED: return "zombieman";
+    case MT_SHOTGUY:   return "shotgun_guy";
+    case MT_VILE:      return "archvile";
+    case MT_UNDEAD:    return "revenant";
+    case MT_FATSO:     return "mancubus";
+    case MT_CHAINGUY:  return "chaingunner";
+    case MT_TROOP:     return "imp";
+    case MT_SERGEANT:  return "pinky";
+    case MT_SHADOWS:   return "spectre";
+    case MT_HEAD:      return "cacodemon";
+    case MT_BRUISER:   return "baron";
+    case MT_KNIGHT:    return "hell_knight";
+    case MT_SKULL:     return "lost_soul";
+    case MT_SPIDER:    return "spider_mastermind";
+    case MT_BABY:      return "arachnotron";
+    case MT_CYBORG:    return "cyberdemon";
+    case MT_PAIN:      return "pain_elemental";
+    case MT_WOLFSS:    return "ss_nazi";
+    case MT_KEEN:      return "commander_keen";
+    case MT_BARREL:    return "barrel";
+    default:           return "thing";
+    }
+}
+
+static const char *weapon_name(weapontype_t w)
+{
+    switch (w) {
+    case wp_fist:         return "fist";
+    case wp_pistol:       return "pistol";
+    case wp_shotgun:      return "shotgun";
+    case wp_chaingun:     return "chaingun";
+    case wp_missile:      return "rocket_launcher";
+    case wp_plasma:       return "plasma_rifle";
+    case wp_bfg:          return "bfg9000";
+    case wp_chainsaw:     return "chainsaw";
+    case wp_supershotgun: return "super_shotgun";
+    default:              return "unknown";
+    }
+}
+
+/* Wall-distance raycast: P_PathTraverse stops at the first line that would block
+ * movement (one-sided, blocking flag, or an opening too small to pass), like
+ * judging depth in the rendered view. */
+#define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
+static fixed_t s_ray_hit_frac;
+static boolean s_ray_hit_is_door; /* hit line is a two-sided line currently too closed to pass */
+
+static boolean agent_ray_traverse(intercept_t *in)
+{
+    line_t *li = in->d.line;
+    boolean blocking;
+    boolean is_door = false;
+    if (!(li->flags & ML_TWOSIDED) || (li->flags & ML_BLOCKING) ||
+        li->frontsector == NULL || li->backsector == NULL) {
+        blocking = true; /* one-sided or explicitly blocking = solid wall */
+    } else {
+        fixed_t opentop = li->frontsector->ceilingheight < li->backsector->ceilingheight
+                              ? li->frontsector->ceilingheight : li->backsector->ceilingheight;
+        fixed_t openbottom = li->frontsector->floorheight > li->backsector->floorheight
+                                 ? li->frontsector->floorheight : li->backsector->floorheight;
+        blocking = (opentop - openbottom) < (56 << FRACBITS); /* closed/too low to pass */
+        is_door = blocking; /* a two-sided line, passable in principle, currently shut = a door */
+    }
+    if (blocking) {
+        s_ray_hit_frac = in->frac;
+        s_ray_hit_is_door = is_door;
+        return false; /* stop at the first obstruction */
+    }
+    return true;
+}
+
+static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door)
+{
+    /* bearing_deg is signed with positive = RIGHT of centre. Doom angles grow
+     * counter-clockwise (left), so a right-of-centre ray is at pm->angle MINUS
+     * the bearing. This keeps `walls`/`door_ahead` bearings consistent with the
+     * `visible` bearings and the turn_left/turn_right tools. */
+    angle_t a = pm->angle - (angle_t)(((int64_t)bearing_deg * 0x100000000LL) / 360);
+    unsigned fa = a >> ANGLETOFINESHIFT;
+    fixed_t range = AGENT_RAY_RANGE << FRACBITS;
+    fixed_t x2 = pm->x + FixedMul(range, finecosine[fa]);
+    fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
+    s_ray_hit_frac = 0;
+    s_ray_hit_is_door = false;
+    P_PathTraverse(pm->x, pm->y, x2, y2, PT_ADDLINES, agent_ray_traverse);
+    if (is_door != NULL) {
+        *is_door = s_ray_hit_is_door;
+    }
+    if (s_ray_hit_frac == 0) {
+        return AGENT_RAY_RANGE; /* clear for at least the scan range */
+    }
+    return (int)(((int64_t)AGENT_RAY_RANGE * s_ray_hit_frac) >> FRACBITS);
+}
+
+/* Capture what the player can currently SEE into an observation. Runs on the
+ * Doom task. Only things inside the rendered field of view and in line of sight
+ * are reported (no enemies behind/occluded), with no targeting hints — the goal
+ * is to mirror the on-screen view, leaving all tactical choices to the agent. */
+static void agent_capture_obs(doom_agent_obs_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    player_t *pl = &players[consoleplayer];
+    mobj_t *pm = pl->mo;
+    if (pm == NULL) {
+        o->valid = false;
+        return;
+    }
+    o->valid = true;
+    o->x = pm->x >> FRACBITS;
+    o->y = pm->y >> FRACBITS;
+    o->z = pm->z >> FRACBITS;
+    /* Report facing as a compass heading (0 = north, 90 = east, clockwise) so it
+     * lines up with the north-up automap. Doom's own angle is 0 = east and grows
+     * counter-clockwise, hence (90 - doom) wrapped to 0..359. */
+    int doom_deg = (int)(((uint64_t)pm->angle * 360u) >> 32);
+    o->angle_deg = (450 - doom_deg) % 360;
+    o->health = pl->health;
+    o->armor = pl->armorpoints;
+    int ammotype = weaponinfo[pl->readyweapon].ammo;
+    o->ammo = (ammotype >= 0 && ammotype < NUMAMMO) ? pl->ammo[ammotype] : -1;
+    strlcpy(o->weapon, weapon_name(pl->readyweapon), sizeof(o->weapon));
+    o->episode = gameepisode;
+    o->map = gamemap;
+
+    int n = 0;
+    for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_VISIBLE; th = th->next) {
+        if (th->function.acp1 != (actionf_p1)P_MobjThinker) {
+            continue;
+        }
+        mobj_t *mo = (mobj_t *)th;
+        if (mo == pm || mo->health <= 0 || !(mo->flags & MF_SHOOTABLE)) {
+            continue;
+        }
+        /* In front, within the rendered field of view... */
+        angle_t rel = R_PointToAngle2(pm->x, pm->y, mo->x, mo->y) - pm->angle;
+        int bearing = (int)(((uint64_t)rel * 360u) >> 32);
+        if (bearing > 180) {
+            bearing -= 360;
+        }
+        /* Doom angles grow counter-clockwise, so a positive rel means the thing is
+         * to the LEFT. Flip it so positive = RIGHT of centre, matching the tools,
+         * the `walls` fan and the automap. */
+        bearing = -bearing;
+        if (bearing < -AGENT_FOV_DEG || bearing > AGENT_FOV_DEG) {
+            continue;
+        }
+        /* ...and not hidden behind walls. */
+        if (!P_CheckSight(pm, mo)) {
+            continue;
+        }
+        strlcpy(o->visible[n].name, name_for_type(mo->type), sizeof(o->visible[n].name));
+        o->visible[n].dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
+        o->visible[n].bearing_deg = bearing;
+        n++;
+    }
+    o->num_visible = n;
+
+    /* Order left-to-right by bearing — the spatial layout on screen, not a priority. */
+    for (int i = 1; i < n; i++) {
+        doom_agent_thing_t t = o->visible[i];
+        int j = i - 1;
+        while (j >= 0 && o->visible[j].bearing_deg > t.bearing_deg) {
+            o->visible[j + 1] = o->visible[j];
+            j--;
+        }
+        o->visible[j + 1] = t;
+    }
+
+    /* Wall distances fanned evenly across the ±AGENT_FOV_DEG field of view (the
+     * depth of the rendered view). A dense fan (many rays) approximates the
+     * continuous rendered image, so the agent can resolve openings and wall edges
+     * a coarse fan would miss. Centred on 0° (straight ahead); C integer division
+     * truncates toward zero, keeping the fan symmetric. */
+    o->num_rays = DOOM_AGENT_NUM_RAYS;
+    int ray_mid = (DOOM_AGENT_NUM_RAYS - 1) / 2;
+    int best_door_absb = 1000; /* most-central door ray seen so far, by |bearing| */
+    for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
+        int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
+        boolean is_door = false;
+        int dist = agent_cast_ray(pm, bearing, &is_door);
+        o->walls[i].bearing_deg = bearing;
+        o->walls[i].dist = dist;
+        /* Report the closed door/passage in view so the agent can tell a re-shut
+         * door (press use again) from a solid wall (go around). A door usually
+         * spans several rays; report the most central one so bearing points at the
+         * door itself, not its edge. */
+        if (is_door) {
+            int absb = bearing < 0 ? -bearing : bearing;
+            if (absb < best_door_absb) {
+                best_door_absb = absb;
+                o->door_ahead_valid = true;
+                o->door_ahead_bearing = bearing;
+                o->door_ahead_dist = dist;
+            }
+        }
+    }
+}
+
+/* Bresenham line into the ASCII grid, clipped to bounds. */
+static void agent_plot(doom_agent_map_t *m, int x0, int y0, int x1, int y1, char ch)
+{
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        if (x0 >= 0 && x0 < m->cols && y0 >= 0 && y0 < m->rows) {
+            m->grid[y0][x0] = ch;
+        }
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* Render the discovered automap (revealed wall lines + player) into an ASCII
+ * grid, north up, auto-scaled to fit the whole revealed extent. Runs on the
+ * Doom task. Mirrors the in-game automap: only ML_MAPPED lines, no things. */
+static void agent_render_map(doom_agent_map_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->rows = DOOM_AGENT_MAP_ROWS;
+    m->cols = DOOM_AGENT_MAP_COLS;
+    for (int r = 0; r < m->rows; r++) {
+        memset(m->grid[r], ' ', m->cols);
+        m->grid[r][m->cols] = '\0';
+    }
+
+    player_t *pl = &players[consoleplayer];
+    mobj_t *pm = pl->mo;
+    if (pm == NULL) {
+        m->valid = false;
+        return;
+    }
+    m->valid = true;
+    /* Compass heading (0 = north, clockwise) to match this north-up grid and the
+     * observation's angle. */
+    m->angle_deg = (450 - (int)(((uint64_t)pm->angle * 360u) >> 32)) % 360;
+
+    const int px = pm->x >> FRACBITS;
+    const int py = pm->y >> FRACBITS;
+    int minx = px, maxx = px, miny = py, maxy = py;
+    for (int i = 0; i < numlines; i++) {
+        if (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW)) {
+            continue;
+        }
+        int xs[2] = {lines[i].v1->x >> FRACBITS, lines[i].v2->x >> FRACBITS};
+        int ys[2] = {lines[i].v1->y >> FRACBITS, lines[i].v2->y >> FRACBITS};
+        for (int k = 0; k < 2; k++) {
+            if (xs[k] < minx) minx = xs[k];
+            if (xs[k] > maxx) maxx = xs[k];
+            if (ys[k] < miny) miny = ys[k];
+            if (ys[k] > maxy) maxy = ys[k];
+        }
+    }
+
+    /* Square cells; pick the scale that fits the larger span. */
+    int upc_x = (maxx - minx) / (m->cols - 1) + 1;
+    int upc_y = (maxy - miny) / (m->rows - 1) + 1;
+    int upc = upc_x > upc_y ? upc_x : upc_y;
+    if (upc < 16) {
+        upc = 16; /* avoid over-zooming a tiny revealed area */
+    }
+    m->units_per_cell = upc;
+    m->origin_x = minx;
+    m->origin_y = maxy; /* row 0 = north (max y) */
+
+    for (int i = 0; i < numlines; i++) {
+        if (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW)) {
+            continue;
+        }
+        int c1 = ((lines[i].v1->x >> FRACBITS) - minx) / upc;
+        int r1 = (maxy - (lines[i].v1->y >> FRACBITS)) / upc;
+        int c2 = ((lines[i].v2->x >> FRACBITS) - minx) / upc;
+        int r2 = (maxy - (lines[i].v2->y >> FRACBITS)) / upc;
+        agent_plot(m, c1, r1, c2, r2, '#');
+    }
+
+    m->player_col = (px - minx) / upc;
+    m->player_row = (maxy - py) / upc;
+    if (m->player_row >= 0 && m->player_row < m->rows &&
+        m->player_col >= 0 && m->player_col < m->cols) {
+        m->grid[m->player_row][m->player_col] = '@';
+    }
+}
+
+bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs)
+{
+    if (!s_doom_ready || s_agent_step_req == NULL) {
+        memset(obs, 0, sizeof(*obs));
+        return false;
+    }
+    s_agent_active = true;
+    s_agent_req_kind = 0;
+    s_agent_action = *action;
+    xSemaphoreGive(s_agent_step_req);
+    if (xSemaphoreTake(s_agent_step_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        memset(obs, 0, sizeof(*obs));
+        return false;
+    }
+    *obs = s_agent_obs;
+    return true;
+}
+
+bool doom_agent_get_map(doom_agent_map_t *map)
+{
+    if (!s_doom_ready || s_agent_step_req == NULL) {
+        memset(map, 0, sizeof(*map));
+        return false;
+    }
+    s_agent_active = true;
+    s_agent_req_kind = 1;
+    xSemaphoreGive(s_agent_step_req);
+    if (xSemaphoreTake(s_agent_step_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        memset(map, 0, sizeof(*map));
+        return false;
+    }
+    *map = s_agent_map;
+    return true;
+}
+
+void doom_agent_set_active(bool active)
+{
+    s_agent_active = active;
+    s_agent_idle_ms = 0;
+    if (!active) {
+        /* Called from the WebSocket task on disconnect: the Doom task owns the
+         * key queue, so just ask it to drop whatever the agent was holding. */
+        s_agent_realtime = false;
+        s_agent_release_pending = true;
+    }
+}
+
 static void doom_task(void *arg)
 {
     (void)arg;
@@ -363,15 +911,108 @@ static void doom_task(void *arg)
     print_doom_banner();
     ESP_LOGI(TAG, "Starting Doom");
     doomgeneric_Create(argc, argv);
+    s_doom_ready = true;
 
     while (true) {
-        doomgeneric_Tick();
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if (s_agent_release_pending) {
+            /* The agent went away (or left realtime mode): stop moving. */
+            s_agent_release_pending = false;
+            agent_release_held();
+        }
+        if (s_agent_active) {
+            /* Lockstep: pause until the agent submits an action, advance, reply.
+             * Realtime: poll for a request, otherwise keep the game ticking with
+             * the last action's keys held. */
+            if (xSemaphoreTake(s_agent_step_req, s_agent_realtime ? 0 : pdMS_TO_TICKS(200)) == pdTRUE) {
+                s_agent_idle_ms = 0;
+                s_agent_last_req_us = esp_timer_get_time();
+                if (s_agent_req_kind == 1) {
+                    agent_render_map(&s_agent_map);
+                } else if (s_agent_action.hold) {
+                    if (!s_agent_realtime) {
+                        ESP_LOGI(TAG, "agent: realtime (free-running) mode");
+                        s_agent_realtime = true;
+                        player_t *rpl = &players[consoleplayer];
+                        if (rpl->mo != NULL) {
+                            s_agent_rt_x = rpl->mo->x;
+                            s_agent_rt_y = rpl->mo->y;
+                            s_agent_rt_angle = rpl->mo->angle;
+                        }
+                        s_agent_rt_tic = gametic;
+                        memset(&s_agent_rt_prev, 0, sizeof(s_agent_rt_prev));
+                    }
+                    agent_realtime_step(&s_agent_action);
+                } else {
+                    if (s_agent_realtime) {
+                        ESP_LOGI(TAG, "agent: back to lockstep mode");
+                        s_agent_realtime = false;
+                        agent_release_held();
+                    }
+                    player_t *apl = &players[consoleplayer];
+                    fixed_t bx = apl->mo ? apl->mo->x : 0;
+                    fixed_t by = apl->mo ? apl->mo->y : 0;
+                    agent_apply_and_tick(&s_agent_action);
+                    agent_capture_obs(&s_agent_obs);
+                    /* A move/strafe was requested but the player made no progress
+                     * along the axis it asked for => ran into something (a shut
+                     * door, a wall). Project the displacement onto the facing and
+                     * side axes rather than using raw distance, so sliding sideways
+                     * along an angled wall still counts as blocked-forward. */
+                    if ((s_agent_action.move != 0 || s_agent_action.strafe != 0) &&
+                        s_agent_obs.valid && apl->mo != NULL) {
+                        int dx = (apl->mo->x - bx) >> FRACBITS;
+                        int dy = (apl->mo->y - by) >> FRACBITS;
+                        unsigned fa = apl->mo->angle >> ANGLETOFINESHIFT;
+                        int fwd = (int)(((int64_t)dx * finecosine[fa] +
+                                         (int64_t)dy * finesine[fa]) >> FRACBITS);
+                        int side = (int)(((int64_t)dx * finesine[fa] -
+                                          (int64_t)dy * finecosine[fa]) >> FRACBITS);
+                        boolean blk = true; /* blocked unless a requested axis advanced */
+                        if (s_agent_action.move > 0 && fwd >= 16) blk = false;
+                        if (s_agent_action.move < 0 && fwd <= -16) blk = false;
+                        if (s_agent_action.strafe != 0 && (side >= 16 || side <= -16)) blk = false;
+                        s_agent_obs.blocked = blk;
+                    }
+                }
+                xSemaphoreGive(s_agent_step_done);
+            } else if (s_agent_realtime) {
+                /* No request pending: the game runs on with the held keys. */
+                doomgeneric_Tick();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                if (s_agent_held_n > 0 && gametic >= s_agent_hold_until_tic) {
+                    agent_release_held(); /* hold timeout: the controller is late, stop moving */
+                }
+                if (esp_timer_get_time() - s_agent_last_req_us > 5000000LL) {
+                    /* Controller vanished without closing — stop moving, resume local play. */
+                    agent_release_held();
+                    s_agent_realtime = false;
+                    s_agent_active = false;
+                    ESP_LOGW(TAG, "agent idle, resuming real-time play");
+                }
+            } else {
+                s_agent_idle_ms += 200;
+                if (s_agent_idle_ms >= 5000) {
+                    /* Controller vanished without closing — resume real-time play. */
+                    s_agent_active = false;
+                    ESP_LOGW(TAG, "agent idle, resuming real-time play");
+                }
+            }
+        } else {
+            doomgeneric_Tick();
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 }
 
 esp_err_t doom_port_start(void)
 {
+    s_agent_step_req = xSemaphoreCreateBinary();
+    s_agent_step_done = xSemaphoreCreateBinary();
+    if (s_agent_step_req == NULL || s_agent_step_done == NULL) {
+        ESP_LOGE(TAG, "Failed to create agent semaphores");
+        return ESP_ERR_NO_MEM;
+    }
+
     BaseType_t created = xTaskCreatePinnedToCore(doom_task, "doom", 16384, NULL, tskIDLE_PRIORITY, NULL, 1);
     return created == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
 }

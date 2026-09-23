@@ -1,4 +1,4 @@
-# An LLM plays DOOM on the SCINTIX P4 (ESP32-P4 + ESP32-C6)
+# AI plays DOOM on the SCINTIX P4 (ESP32-P4 + ESP32-C6)
 
 **Claude Sonnet plays real DOOM** on the **SCINTIX P4** — our custom board built
 around the **ESP32-P4** with an **ESP32-C6** wireless co-processor — driving the game
@@ -8,10 +8,8 @@ MCP server expose the running game so a large language model can play it, seeing
 what a player sees on screen.
 
 > **🟣 Update — now Jev plays too.** A second AI takes the controls: **Jev**,
-> TypeSafe's "System One" reflex model, deciding in ~500 ms and playing in real time.
-> Code, tools and the full write-up are on the
-> [`ai-agent-api`](https://github.com/relocsrl/scintix-p4-playing-doom/tree/ai-agent-api)
-> branch.
+> TypeSafe's "System One" reflex model, deciding in ~500 ms and playing in **real time**
+> ([see below](#or-reflexes-jev-in-real-time)).
 
 ## The board
 
@@ -64,6 +62,24 @@ claude mcp add doom-scintix-p4 -e DOOM_WS_URL=ws://<device-ip>/agent -- python t
 > Get into a level first (New Game from the menu) before driving it — at the title
 > screen there is no live player to observe.
 
+## …or reflexes: Jev in real time
+
+MCP suits an LLM that reasons in prose, one move at a time. A very different AI can play
+too: **Jev**, TypeSafe's "System One" model, which returns a typed, calibrated decision
+in ~500 ms instead of text. Fast enough to play in **real time** — a free-running
+firmware mode lets the game run without pausing while Jev drives the marine (it also
+still runs in lockstep, so nothing about the MCP/LLM path changes).
+
+A reflex model has no memory between calls, so the Python agent builds Jev's state each
+step and folds in the short-term memory it lacks — recent actions, doors already tried,
+whether it's making progress — enough to keep it from looping. Jev can play alone, or
+with a slower **LLM "supervisor"** that reads the automap every few seconds and sets the
+strategy (so an LLM still has a seat at the table).
+
+`tools/doom_jev_agent.py` is the agent (reflexes, or reflexes + LLM supervisor) and
+`tools/doom_agent_sim.py` a board-free simulator. See [`tools/README.md`](tools/README.md)
+and [`docs/jev-agent-notes.md`](docs/jev-agent-notes.md).
+
 ## Target hardware (SCINTIX P4)
 
 - **MCU**: ESP32-P4 (rev. v3.1/v3.2), 32 MB hex PSRAM, 32 MB flash.
@@ -73,7 +89,8 @@ claude mcp add doom-scintix-p4 -e DOOM_WS_URL=ws://<device-ip>/agent -- python t
 - **Audio**: **ES8311** I²S codec + speaker — tested with the external
   [M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase).
 - **Controls**: wired **USB** — a standard USB keyboard **or** a USB gamepad
-  (DualShock 4 / generic HID). The AI plays over Wi-Fi (MCP), no controller needed.
+  (DualShock 4 / generic HID). The AI plays over Wi-Fi (MCP, or the `/agent` API for
+  Jev), no controller needed.
 
 ## What this fork changes vs. the original
 

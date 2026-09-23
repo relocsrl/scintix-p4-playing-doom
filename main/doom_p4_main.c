@@ -34,6 +34,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "audio_doom.h"
+#include "doom_agent.h"
 #include "doom_port.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
@@ -693,6 +694,7 @@ static esp_err_t start_portal_servers(void)
         (err = httpd_register_uri_handler(s_portal_server, &settings_save)) != ESP_OK ||
         (err = httpd_register_uri_handler(s_portal_server, &api_settings)) != ESP_OK ||
         (err = httpd_register_uri_handler(s_portal_server, &api_controller)) != ESP_OK ||
+        (err = doom_agent_register(s_portal_server)) != ESP_OK ||
         (err = httpd_register_err_handler(s_portal_server, HTTPD_404_NOT_FOUND, portal_404_handler)) != ESP_OK) {
         ESP_LOGE(NET_TAG, "HTTP portal handler registration failed: %s", esp_err_to_name(err));
         httpd_stop(s_portal_server);
@@ -953,17 +955,20 @@ static void init_wifi_with_portal(void)
     wifi_config_t saved_wifi_config = {};
     if (load_saved_wifi_config(&saved_wifi_config)) {
         ESP_LOGI(NET_TAG, "Saved Wi-Fi credentials found for SSID '%s'; starting STA", saved_wifi_config.sta.ssid);
-        err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
-        if (err != ESP_OK) {
-            ESP_LOGE(NET_TAG, "Failed to apply saved Wi-Fi credentials: %s", esp_err_to_name(err));
-            return;
-        }
+        /* Mode must be set before the interface config — esp_wifi_set_config
+         * returns ESP_ERR_WIFI_MODE otherwise. */
         err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err == ESP_OK) {
+            err = esp_wifi_set_config(WIFI_IF_STA, &saved_wifi_config);
+        }
+        if (err == ESP_OK) {
             err = esp_wifi_start();
-            if (err == ESP_OK) {
-                s_wifi_started = true;
-            }
+        }
+        if (err == ESP_OK) {
+            s_wifi_started = true;
+        } else {
+            ESP_LOGE(NET_TAG, "STA setup failed (%s); falling back to captive portal", esp_err_to_name(err));
+            err = start_wifi_portal();
         }
     } else {
         ESP_LOGI(NET_TAG, "No saved Wi-Fi credentials; starting captive portal");
@@ -1003,6 +1008,27 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Doom P4 bringup complete");
     init_wifi_with_portal();
+
+#if CONFIG_SCINTIX_BOARD_REV_1_2
+    /* Board rev 1.2: this GPIO drives the CM4/CM5 IO board's USB Type-A (host) 5V
+     * power switch. Drive it high before bringing up the USB host so bus-powered
+     * peripherals (e.g. a keyboard) get power and enumerate. Rev 1.1 boards do not
+     * connect this pin, so this whole block is a no-op there when the option is off. */
+    {
+        const gpio_num_t usb_a_pwr = CONFIG_SCINTIX_USB_A_PWR_EN_GPIO;
+        gpio_config_t usb_a_cfg = {
+            .pin_bit_mask = 1ULL << usb_a_pwr,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&usb_a_cfg));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(usb_a_pwr, 1));
+        ESP_LOGI(TAG, "Board rev 1.2: USB Type-A 5V enabled (GPIO%d high)", usb_a_pwr);
+    }
+#endif
+
     ESP_ERROR_CHECK_WITHOUT_ABORT(usb_gamepad_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(doom_port_start());
 
