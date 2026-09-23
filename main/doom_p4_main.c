@@ -1008,6 +1008,27 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Doom P4 bringup complete");
     init_wifi_with_portal();
+
+#if CONFIG_SCINTIX_BOARD_REV_1_2
+    /* Board rev 1.2: this GPIO drives the CM4/CM5 IO board's USB Type-A (host) 5V
+     * power switch. Drive it high before bringing up the USB host so bus-powered
+     * peripherals (e.g. a keyboard) get power and enumerate. Rev 1.1 boards do not
+     * connect this pin, so this whole block is a no-op there when the option is off. */
+    {
+        const gpio_num_t usb_a_pwr = CONFIG_SCINTIX_USB_A_PWR_EN_GPIO;
+        gpio_config_t usb_a_cfg = {
+            .pin_bit_mask = 1ULL << usb_a_pwr,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&usb_a_cfg));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(usb_a_pwr, 1));
+        ESP_LOGI(TAG, "Board rev 1.2: USB Type-A 5V enabled (GPIO%d high)", usb_a_pwr);
+    }
+#endif
+
     ESP_ERROR_CHECK_WITHOUT_ABORT(usb_gamepad_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(doom_port_start());
 
