@@ -7,6 +7,12 @@ hardware-scaled to ~30 FPS by the P4's PPA); a small WebSocket "lockstep" API an
 MCP server expose the running game so a large language model can play it, seeing only
 what a player sees on screen.
 
+> **🟣 Update — now Jev plays too.** A second AI takes the controls: **Jev**,
+> TypeSafe's "System One" reflex model, deciding in ~500 ms and playing in real time.
+> Code, tools and the full write-up are on the
+> [`ai-agent-api`](https://github.com/relocsrl/scintix-p4-playing-doom/tree/ai-agent-api)
+> branch.
+
 ## The board
 
 The SCINTIX P4 (RM-CMP4) is a compact ESP32-P4 compute module in the Raspberry Pi
