@@ -77,9 +77,44 @@ def say(text):
         sys.stdout.flush()
 
 
+# --- console styling (for the live terminal shown next to the game) ----------
+USE_COLOR = False
+_ANSI = {"dim": "2", "bold": "1", "red": "31", "grn": "32", "yel": "33", "blu": "34",
+         "mag": "35", "cyn": "36", "wht": "97", "bred": "91", "bgrn": "92", "byel": "93",
+         "bcyn": "96", "bmag": "95"}
+
+
+def c(text, *styles):
+    """Wrap text in ANSI styles when colour is on, else return it unchanged."""
+    if not USE_COLOR or not styles:
+        return text
+    codes = ";".join(_ANSI[s] for s in styles if s in _ANSI)
+    return f"\x1b[{codes}m{text}\x1b[0m" if codes else text
+
+
+def enable_color(mode):
+    """Turn the ANSI styling on (mode 'always', or 'auto' on a TTY). On Windows,
+    switch the console into virtual-terminal mode so the codes render."""
+    global USE_COLOR
+    on = mode == "always" or (mode == "auto" and hasattr(sys.stdout, "isatty") and sys.stdout.isatty())
+    if on and os.name == "nt":
+        try:
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.SetConsoleMode(k.GetStdHandle(-11), 7)   # ENABLE_VIRTUAL_TERMINAL_PROCESSING | defaults
+        except Exception:
+            pass
+    USE_COLOR = on
+
+
 TICRATE = 35                      # Doom game tics per second
 JEV_DEFAULT_URL = "https://api.typesafe.ai/v1/systemone"
 JEV_DEFAULT_MODEL = "jev-latest"
+# urllib's default User-Agent ("Python-urllib/3.x") trips Cloudflare bot protection in
+# front of the API (HTTP 403, error 1010: "blocked based on your browser's signature").
+# Send an ordinary browser User-Agent so a legitimate API call is not mistaken for a bot.
+JEV_DEFAULT_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 JEV_PRICE_PER_MTOK = 0.042        # USD per million input tokens (output is free)
 ANTHROPIC_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/") + "/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -122,12 +157,13 @@ def turn_deg(tics):
 MACROS = {
     "forward": dict(
         action={"move": "forward"}, tics=8,
-        desc="Walk straight ahead a short distance. Right when the `ahead` "
-             "sector is clear (min_dist well above 120) and nothing more "
-             "urgent is in view."),
+        desc="Walk straight ahead a short distance. Right when `view.ahead_min_dist` "
+             "is well above 120 (the path is clear of walls AND barrels) and nothing "
+             "more urgent is in view. Wrong when a barrel sits in your path "
+             "(ahead_min_dist small): sidestep or turn to go around it first."),
     "forward_long": dict(
         action={"move": "forward"}, tics=16,
-        desc="Walk straight ahead a long stretch. Only when `ahead` min_dist is "
+        desc="Walk straight ahead a long stretch. Only when `view.ahead_min_dist` is "
              "large (>= 500), no enemy is close, and the path is a clear corridor "
              "or open room."),
     "forward_left": dict(
@@ -145,28 +181,31 @@ MACROS = {
         desc="Turn left in place about 30 degrees, no movement. Use to face an "
              "enemy or an opening on the left (bearing < -15), to follow a "
              "commander turn_hint of `left`, or to look for a way out when ahead "
-             "is blocked and the left side has more room."),
+             "is blocked (or progress.going_nowhere) and the left side has more room."),
     "turn_right": dict(
         action={"turn": "right"}, tics=turn_tics(30),
         desc="Turn right in place about 30 degrees, no movement. Use to face an "
              "enemy or an opening on the right (bearing > 15), to follow a "
              "commander turn_hint of `right`, or to look for a way out when ahead "
-             "is blocked and the right side has more room."),
+             "is blocked (or progress.going_nowhere) and the right side has more room."),
     "turn_left_small": dict(
         action={"turn": "left"}, tics=turn_tics(9),
-        desc="Small left adjustment (~9 degrees): centre an enemy or a door that "
-             "is only slightly left (bearing -4 to -15) so you can shoot or walk "
-             "through it."),
+        desc="Small left adjustment (~9 degrees): centre a door, or an enemy that is "
+             "off-centre to the left (bearing -9 to -18). NOT when aim.on_target "
+             "(bearing within +/-8): the shot already lands, so hold and fire "
+             "instead - a turn overshoots."),
     "turn_right_small": dict(
         action={"turn": "right"}, tics=turn_tics(9),
-        desc="Small right adjustment (~9 degrees): centre an enemy or a door that "
-             "is only slightly right (bearing +4 to +15) so you can shoot or walk "
-             "through it."),
+        desc="Small right adjustment (~9 degrees): centre a door, or an enemy that is "
+             "off-centre to the right (bearing +9 to +18). NOT when aim.on_target "
+             "(bearing within +/-8): the shot already lands, so hold and fire "
+             "instead - a turn overshoots."),
     "turn_around": dict(
         action={"turn": "right"}, tics=turn_tics(180),
-        desc="Turn about 180 degrees. Only for a dead end: every sector in view "
-             "is close (all min_dist < 150), no door_ahead, and you have been "
-             "blocked repeatedly."),
+        desc="Turn about 180 degrees. ONLY when `way_out.dead_end` is true (every "
+             "direction in view is a near wall) and you did not just turn_around. If "
+             "any direction is open (`way_out.dist` is large), turn toward "
+             "`way_out.bearing` instead - turning around twice just spins you back."),
     "back": dict(
         action={"move": "back"}, tics=8,
         desc="Step backwards. Use when a melee enemy (pinky, imp, zombieman) "
@@ -187,13 +226,19 @@ MACROS = {
         desc="Press USE: opens the door in front, flips a switch. USE only "
              "reaches about 64 units, so it is right when door_ahead is very "
              "close (dist < 70) and roughly centred (|bearing| <= 20); if the door "
-             "is farther, walk up to it first. Also try it when blocked straight "
-             "ahead by a flat wall very close (a hidden door or switch)."),
+             "is farther, walk up to it first. Again when door_ahead is still there "
+             "with tics_since_press >= 50 (the press did not take); never while "
+             "tics_since_press < 50 (it would send the rising door back down), never "
+             "on a `wont_open` door. Also try it when blocked straight ahead by a "
+             "flat wall very close (a hidden door or switch)."),
     "wait": dict(
         action={}, tics=8,
-        desc="Stand still for a moment. Right after `use` on a door: doors take "
-             "about a second to rise, walking into them is what gets you "
-             "`blocked`. Also to let an approaching enemy come into your sights."),
+        desc="Stand still for a moment (FIRE still works while waiting). Best when "
+             "aim.on_target: hold your heading and shoot, do not turn. Right after "
+             "`use` on a door, while door_ahead.tics_since_press < 50: doors take "
+             "about a second to rise, walking into them is what gets you `blocked`. "
+             "Also to let an approaching enemy come into your sights. Wrong when "
+             "progress.going_nowhere and no door is rising and no enemy on target."),
 }
 
 MACRO_NAMES = list(MACROS.keys())
@@ -261,12 +306,49 @@ STATE_LEGEND = (
     "0 = straight ahead, negative = LEFT, positive = RIGHT; the view spans "
     "-45..45. `view.sectors` is the depth of the rendered view: min_dist is the "
     "nearest wall in that sector (2048 = nothing within scan range). "
+    "`view.ahead_min_dist` is how far you can actually walk straight forward before "
+    "hitting something - a wall OR a barrel in your path (barrels are not walls, so "
+    "a sector can read 'clear' while a barrel blocks you): when it is small, forward "
+    "is blocked whatever the sectors say. "
+    "`view.rays` (present near a door or when you are stuck) is the full depth fan: "
+    "51 rays across -45..+45 degrees (~1.8 deg apart), each {b: bearing, d: wall "
+    "distance}; use it to line up precisely on a narrow doorway or opening that the 7 "
+    "sectors are too coarse to place. "
     "`view.openings` are rays much longer than their neighbours = a passage or "
     "doorway. `door_ahead` is a closed door/passage in view (USE reaches only "
     "~64 units: walk up to it, press `use` when dist < 70 and roughly centred, "
-    "then wait; it re-appears if the door re-closed). "
+    "then wait; it re-appears if the door re-closed). `door_ahead.presses` / "
+    "`tics_since_press` (present once you pressed USE on this door; 35 tics = 1 s): a "
+    "door that opens is gone from door_ahead ~28 tics after the press, so with "
+    "tics_since_press < 50 it is still rising (wait, do not turn away, do not press "
+    "again: a press while it rises sends it back down); still there with "
+    "tics_since_press >= 50 = the press did not take: press `use` again. "
+    "`door_ahead.wont_open` = pressed 3 times and it stayed shut (locked: needs a "
+    "key, or not a real door): treat it as a wall, do NOT walk up to it again, "
+    "explore elsewhere. "
+    "`progress.moved_last_10_steps` = how far you got over the last 10 decisions; "
+    "`progress.going_nowhere` = under 48 units: unless you are waiting for a door "
+    "you just pressed, you are stuck (dithering, spinning, waiting, or pushing into "
+    "something): change what you are doing. `dithering` = your last macros "
+    "alternate between a move and its opposite (left/right, forward/back). "
+    "`enemies_in_view` are monsters. `aim` (present when a monster is in view) is the "
+    "nearest one and `aim.on_target` = it is already inside your gun's hit cone with "
+    "ammo left: FIRE and hold your heading (`wait`), do NOT turn — a shot lands "
+    "anywhere in the cone, and because decisions lag ~0.7 s a turn to 'centre better' "
+    "acts on an old bearing and overshoots, which is what makes you swing past the "
+    "enemy again and again. Only turn when the enemy is outside the cone. "
+    "`hazards_in_view` are exploding barrels: "
+    "obstacles, NOT targets - never turn to centre one or walk into it, go around "
+    "it (a shot barrel hurts everything within ~128 units, you included). "
     "`blocked_last_move` = the last move made no progress (wall, shut door, or "
-    "an obstacle). `heading` is a compass heading, 0 = north, 90 = east. "
+    "an obstacle). `way_out` is the most open direction in view {bearing, dist, side}: "
+    "when you are stuck (blocked or progress.going_nowhere) with no enemy/door, make a "
+    "single turn toward `way_out.bearing` and then go `forward` - do NOT keep turning "
+    "and do NOT `turn_around` unless `way_out.dead_end` is true (every direction in "
+    "view is a near wall). Never `turn_around` twice in a row: if you just did "
+    "(recent_actions ends in turn_around) and you are still boxed in, pick "
+    "`way_out.side` instead - a second turn_around only spins you back where you were. "
+    "`heading` is a compass heading, 0 = north, 90 = east. "
     "`commander` (when present) is the strategic layer's current intent: "
     "`turn_hint` says which way to turn to get on the requested heading."
 )
@@ -372,6 +454,9 @@ class Memory:
         self.unfreeze_presses = 0
         self.reconnects = 0
         self.device_latency = collections.deque(maxlen=20)
+        self.last_stall_step = -1000    # step of the last stall-net override (cooldown)
+        self.door_work = None     # the door last pressed with USE in reach: {"x","y","level","tries","tic"}
+        self.dead_doors = []      # doors still shut after DOOR_MAX_TRIES presses: {"x","y","tic","level"}
 
     def note_step(self, macro, obs, latency, usage):
         self.steps += 1
@@ -411,6 +496,20 @@ class Memory:
         for a, b in zip(pts, pts[1:]):
             d += math.hypot(b[1] - a[1], b[2] - a[2])
         return d
+
+    def net_displacement(self, steps):
+        """Straight-line distance between the positions `steps` steps apart (None
+        until there are that many)."""
+        if steps <= 0 or len(self.positions) < steps:
+            return None
+        pts = list(self.positions)[-steps:]
+        return math.hypot(pts[-1][1] - pts[0][1], pts[-1][2] - pts[0][2])
+
+    def stalled(self, steps, radius):
+        """True when the marine's net displacement over the last `steps` steps is
+        under `radius` units: dithering, spinning or pushing in place."""
+        d = self.net_displacement(steps)
+        return d is not None and d < radius
 
     def coverage_growth(self, seconds):
         cutoff = time.time() - seconds
@@ -475,8 +574,9 @@ class JevFatal(JevError):
 def build_questions(intent):
     fire_true = ("An enemy in enemies_in_view is roughly centred (|bearing| <= 10) "
                  "and within 1500 units, and ammo is not 0.")
-    fire_false = ("Nothing is centred in the view, the only centred thing is a "
-                  "barrel closer than 200 units, or ammo is 0.")
+    fire_false = ("No enemy in enemies_in_view is centred, a barrel in hazards_in_view "
+                  "is centred and closer than 200 units (its blast would hurt you), "
+                  "or ammo is 0.")
     if intent.fire_policy == "aggressive":
         fire_true = ("An enemy is anywhere near the centre (|bearing| <= 16) and "
                      "within 2000 units, and ammo is not 0. Shoot early.")
@@ -490,12 +590,23 @@ def build_questions(intent):
                 "You are the reflexes of the DOOM marine. Pick the ONE macro to run for "
                 "the next ~0.3 s given the state. Priorities: (1) do not repeat a macro "
                 "that was just `blocked_last_move` — change direction instead; "
-                "(2) if an enemy is in view, turn to centre it, keep distance from "
-                "melee enemies closer than 120; (3) if door_ahead is present, walk up to "
-                "it (forward / small turns to centre it) until dist < 70, then `use`, then "
-                "`wait` one step while it rises; (4) otherwise make progress toward the "
+                "(2) if `aim.on_target`, do NOT turn: `wait` (hold heading) and let "
+                "FIRE do the work - turning here overshoots (lag). If an enemy is in "
+                "view but off-centre, turn to centre it (small turn when close to "
+                "centred), keep distance from "
+                "melee enemies closer than 120; barrels (hazards_in_view) are NOT "
+                "enemies: never turn to centre one, and if one is right ahead, sidestep "
+                "or turn to go around it; (3) if door_ahead is present and not "
+                "`wont_open` (a wont_open door is a wall: turn away from it), walk up to "
+                "it (forward / small turns to centre it) until dist < 70, then `use`; "
+                "while door_ahead.tics_since_press < 50 `wait` facing it; if it is still "
+                "there at tics_since_press >= 50, `use` again; once door_ahead is gone the "
+                "door is open: walk through it (`forward`); (4) if progress.going_nowhere "
+                "or dithering, and no enemy in view and no door rising: do something "
+                "different - turn toward the longest open sector or the best `opening`, "
+                "then go forward; (5) otherwise make progress toward the "
                 "commander goal / turn_hint if present, else toward the longest open "
-                "sector or the best `opening`; (5) prefer forward motion when `ahead` "
+                "sector or the best `opening`; (6) prefer forward motion when `ahead` "
                 "is clear. Avoid oscillating left/right (see recent_actions)."),
             "criteria": {name: m["desc"] for name, m in MACROS.items()},
         },
@@ -510,13 +621,15 @@ def build_questions(intent):
 class JevClient:
     """Minimal HTTP client for POST /v1/systemone (no SDK dependency)."""
 
-    def __init__(self, url, api_key, model=JEV_DEFAULT_MODEL, timeout=2.0):
+    def __init__(self, url, api_key, model=JEV_DEFAULT_MODEL, timeout=2.0,
+                 user_agent=JEV_DEFAULT_USER_AGENT):
         if not api_key:
             raise JevError("no TypeSafe API key: set TYPESAFE_API_KEY or use --jev-key / --jev dry")
         self.url = url
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.user_agent = user_agent
         self.name = f"jev:{model}"
 
     def decide(self, state, questions):
@@ -525,7 +638,9 @@ class JevClient:
             self.url, data=body, method="POST",
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json",
-                     "Accept": "application/json"})
+                     "Accept": "application/json",
+                     "User-Agent": self.user_agent,
+                     "Accept-Language": "en-US,en;q=0.9"})
         last_err = None
         for attempt in range(2):
             try:
@@ -544,6 +659,13 @@ class JevClient:
                 if e.code in (429, 529) and attempt == 0:
                     time.sleep(0.3)
                     continue
+                if e.code == 403 and ("1010" in detail or "cloudflare" in detail.lower()):
+                    raise JevFatal(
+                        "HTTP 403 Cloudflare (error 1010): the request was blocked by bot "
+                        "protection in front of the API, not by your key. This client already "
+                        "sends a browser User-Agent; if it still fails the block is on the TLS "
+                        "fingerprint. Try --jev-user-agent \"...\", or reach the API through a "
+                        "browser-like client / proxy.")
                 if 400 <= e.code < 500 and e.code != 429:
                     raise JevFatal(f"HTTP {e.code}: {detail or e.reason}")
                 raise JevError(f"HTTP {e.code}: {detail or e.reason}")
@@ -566,8 +688,11 @@ class DryJev:
     def decide(self, state, questions):
         view = state["view"]
         sect = {s["sector"]: s["min_dist"] for s in view["sectors"]}
+        ahead = view.get("ahead_min_dist", sect["ahead"])   # walkable clearance (wall or barrel)
         enemies = state.get("enemies_in_view", [])
         door = state.get("door_ahead")
+        if door and door.get("wont_open"):
+            door = None                 # a door that did not open is just a wall
         recent = state.get("recent_actions", [])
         blocked = state.get("blocked_last_move", False)
         n_blocked = state.get("consecutive_blocked", 0)
@@ -582,31 +707,44 @@ class DryJev:
         targets = [e for e in enemies if e["name"] != "barrel"]
         if targets:
             e = min(targets, key=lambda e: e["dist"])
-            if abs(e["bearing"]) > 10:
-                choice = ("turn_left" if e["bearing"] < -25 else "turn_left_small") if e["bearing"] < 0 \
-                    else ("turn_right" if e["bearing"] > 25 else "turn_right_small")
+            if abs(e["bearing"]) > 18:
+                choice = "turn_left" if e["bearing"] < 0 else "turn_right"
+            elif abs(e["bearing"]) > AIM_CONE:
+                choice = "turn_left_small" if e["bearing"] < 0 else "turn_right_small"
             elif e["dist"] < 120:
-                choice = "back"
-            elif e["dist"] > 600 and sect["ahead"] > 200:
-                choice = "forward"
+                choice = "back"          # centred but in melee range: back off, keep firing
+            elif e["dist"] <= AIM_HOLD_DIST:
+                choice = "wait"          # centred and in range: hold and fire (a turn overshoots)
             else:
-                choice = "strafe_left" if state["steps"] % 2 else "strafe_right"
-        elif door and abs(door["bearing"]) <= 25:
+                choice = "forward"       # centred but far: close in, firing while advancing
+        elif door and abs(door["bearing"]) <= 25 and (door["dist"] < 70 or n_blocked < 2):
+            # (a far door behind something that keeps blocking us: the rules below)
             if door["dist"] < 70:
-                choice = "wait" if recent and recent[-1] == "use" else "use"
+                rising = door.get("presses") and door.get("tics_since_press", 0) < 50
+                choice = "wait" if rising or (recent and recent[-1] == "use") else "use"
             elif abs(door["bearing"]) > 8 and door["dist"] < 300:
                 choice = "turn_left_small" if door["bearing"] < 0 else "turn_right_small"
             else:
                 choice = "forward"
-        elif n_blocked >= 2:
-            left = max(sect["left"], sect["far_left"])
-            right = max(sect["right"], sect["far_right"])
-            choice = "turn_around" if max(left, right) < 150 else ("turn_left" if left > right else "turn_right")
-        elif hint in ("left", "right") and sect["ahead"] < 400:
+        elif state.get("progress", {}).get("going_nowhere") or n_blocked >= 2:
+            # stuck: head for the most open direction (way_out). turn_around only for a
+            # real dead end, and never twice in a row (that just spins back).
+            wo = state.get("way_out") or {}
+            b = wo.get("bearing", 0)
+            just_turned = recent and recent[-1] == "turn_around"
+            if wo.get("dead_end") and not just_turned:
+                choice = "turn_around"
+            elif wo.get("side") == "ahead" and ahead >= 120 and not blocked:
+                choice = "forward"
+            elif abs(b) <= 18:
+                choice = "turn_left_small" if b < 0 else "turn_right_small"
+            else:
+                choice = "turn_left" if b < 0 else "turn_right"
+        elif hint in ("left", "right") and ahead < 400:
             choice = "turn_" + hint
-        elif sect["ahead"] >= 600 and not blocked:
+        elif ahead >= 600 and not blocked:
             choice = "forward_long"
-        elif sect["ahead"] >= 120 and not blocked:
+        elif ahead >= 120 and not blocked:
             if hint == "left" and sect["centre_left"] > 250:
                 choice = "forward_left"
             elif hint == "right" and sect["centre_right"] > 250:
@@ -633,10 +771,192 @@ class DryJev:
 # State builder
 # ----------------------------------------------------------------------------
 
-def build_state(obs, mem, intent, map_win):
+NON_HOSTILE = {"barrel"}   # shootable things the firmware reports that are obstacles, not targets
+
+
+def hostiles(visible):
+    """The things in view that are actual enemies (barrels are obstacles, not targets)."""
+    return [e for e in visible if e["name"] not in NON_HOSTILE]
+
+
+# Door memory. Jev sees one moment at a time, so the agent remembers the door it
+# pressed USE on and tells Jev (door_ahead.presses / tics_since_press / wont_open).
+# A working Doom door is passable (and door_ahead gone) ~28 tics after a USE, so a
+# door still shut DOOR_RETRY_TICS after a press in reach did not open. A press does
+# not always take (seen on the board: the first one, still sliding in, did nothing;
+# the second opened it), so press again. After DOOR_MAX_TRIES it is locked (needs a
+# key) or not a real door (window, ledge): remembered for DEAD_DOOR_TICS.
+DOOR_REACH = 64            # USE reaches this far (map units)
+DOOR_PRESS_DIST = 80       # a press from up to here counts: the marine's momentum carries it into reach
+DOOR_SAME = 64             # two door sightings this close are the same door
+DOOR_RETRY_TICS = 50       # > 28 with a margin: pressing while it still rises would send it back down
+DOOR_MAX_TRIES = 3
+DOOR_FORGET_TICS = 10 * TICRATE  # a door pressed this long ago, or DOOR_FORGET_DIST away, is not "being worked"
+DOOR_FORGET_DIST = 256
+DEAD_DOOR_TICS = 120 * TICRATE   # then it gets another chance
+
+# Progress, as told to Jev: net displacement over the last PROGRESS_STEPS decisions;
+# under GOING_NOWHERE units the marine is going nowhere (dithering, spinning, waiting,
+# pushing in place - turning in place is never `blocked`).
+PROGRESS_STEPS = 10
+GOING_NOWHERE = 48
+
+# Aiming: a hitscan shot lands anywhere within this bearing cone, and at ~700 ms Jev
+# latency a turn to "centre better" acts on a stale bearing and overshoots. So once the
+# enemy is centred AND close enough to be worth engaging, hold and fire instead of
+# turning. Centred but far: keep moving (you fire while advancing) rather than freezing.
+AIM_CONE = 8
+AIM_HOLD_DIST = 700
+
+
+def level_of(obs):
+    return f"E{obs.get('episode')}M{obs.get('map')}"
+
+
+def door_world_pos(obs):
+    """Map coordinates (x east, y north) of obs['door_ahead']: heading is a compass
+    angle and bearing + = right = clockwise, so the door lies at heading + bearing."""
+    door = obs.get("door_ahead")
+    if not door or not obs.get("valid"):
+        return None
+    a = math.radians(obs["angle"] + door["bearing"])
+    return obs["x"] + door["dist"] * math.sin(a), obs["y"] + door["dist"] * math.cos(a)
+
+
+def _near(p, rec):
+    return math.hypot(p[0] - rec["x"], p[1] - rec["y"]) <= DOOR_SAME
+
+
+def is_dead_door(obs, mem):
+    """True when door_ahead is a door that stayed shut after a USE in reach, recently."""
+    p = door_world_pos(obs)
+    if p is None:
+        return False
+    lvl = level_of(obs)
+    return any(d["level"] == lvl and mem.game_tics - d["tic"] < DEAD_DOOR_TICS and _near(p, d)
+               for d in mem.dead_doors)
+
+
+def note_door_attempt(obs, mem):
+    """A USE was just pressed: if it was aimed at door_ahead from within reach, count it
+    against that door (to press again, or give up, if the door stays shut)."""
+    door = obs.get("door_ahead")
+    if not (door and door["dist"] <= DOOR_PRESS_DIST and abs(door["bearing"]) <= 25):
+        return
+    p = door_world_pos(obs)
+    if p is None:
+        return
+    w = mem.door_work
+    if w and w["level"] == level_of(obs) and _near(p, w):
+        w["tries"] += 1
+        w["tic"] = mem.game_tics
+    else:
+        mem.door_work = {"x": p[0], "y": p[1], "level": level_of(obs), "tries": 1, "tic": mem.game_tics}
+
+
+def bearing_to(obs, x, y):
+    """Bearing (deg, + = right) from the player to the map point (x, y)."""
+    b = math.degrees(math.atan2(x - obs["x"], y - obs["y"])) - obs["angle"]
+    return (b + 180) % 360 - 180
+
+
+def door_status(obs, mem):
+    """Where the marine is with the door it last pressed USE on:
+    None      no such door, or it is not in view (it opened, or we looked away);
+    "working" still shut, but give it time to rise (waiting here is not being stuck);
+    "retry"   still shut DOOR_RETRY_TICS after the press: the press did not take;
+    "dead"    still shut after DOOR_MAX_TRIES presses: now remembered as not opening."""
+    w = mem.door_work
+    if not w:
+        return None
+    if w["level"] != level_of(obs) or mem.game_tics - w["tic"] > DOOR_FORGET_TICS or \
+            math.hypot(obs["x"] - w["x"], obs["y"] - w["y"]) > DOOR_FORGET_DIST:
+        mem.door_work = None
+        return None
+    p = door_world_pos(obs)
+    if p is None or not _near(p, w):
+        # Gone from view. Looking right at where it was: it opened, done with it.
+        # Looked away: keep counting, so turning away between presses of a locked
+        # door does not reset the count (that is the loop this is meant to end).
+        if abs(bearing_to(obs, w["x"], w["y"])) <= 30:
+            mem.door_work = None
+        return None
+    if mem.game_tics - w["tic"] < DOOR_RETRY_TICS:
+        return "working"
+    if w["tries"] < DOOR_MAX_TRIES:
+        return "retry"
+    mem.dead_doors.append({"x": w["x"], "y": w["y"], "tic": mem.game_tics, "level": w["level"]})
+    mem.door_work = None
+    return "dead"
+
+
+SECTOR_BEARING = {name: (lo + hi) / 2 for name, lo, hi in SECTORS}
+
+
+def way_out(sectors, openings):
+    """The most open direction in view, for getting unstuck: a long opening if there
+    is one, else the sector with the most room. `dead_end` = nothing in view is far."""
+    best = max(openings, key=lambda o: o["dist"]) if openings else None
+    if not best:
+        s = max(sectors, key=lambda s: s["max_dist"])
+        best = {"bearing": SECTOR_BEARING[s["sector"]], "dist": s["max_dist"]}
+    b = best["bearing"]
+    side = "ahead" if abs(b) <= 10 else ("left" if b < 0 else "right")
+    dead_end = all(s["min_dist"] < 150 for s in sectors) and best["dist"] < 200
+    return {"bearing": round(b), "dist": round(best["dist"]), "side": side, "dead_end": dead_end}
+
+
+def obstacle_ahead(walls_ahead, hazards, bearing=15):
+    """How far the marine can actually walk straight before hitting something: the
+    nearest wall dead ahead, but also a barrel in the walking corridor (barrels are
+    not in the wall fan, so without this `ahead` reads the wall *behind* the barrel
+    and forward looks clear while the marine plows into it)."""
+    d = walls_ahead
+    for h in hazards:
+        if abs(h["bearing"]) <= bearing and h["dist"] < d:
+            d = h["dist"]
+    return d
+
+
+def view_of(obs, sectors, openings, ahead, mem, rays_mode):
+    """The `view` block. Always the 7-sector summary + openings + ahead_min_dist. The
+    full 51-ray fan is worth its ~+750 tokens only for lining up on a narrow doorway or
+    threading a tight spot (an A/B showed the 7 sectors match the full fan ~85% of the
+    time, differing mainly there), so with rays_mode 'auto' it is added only near a door
+    or when stuck; 'always' / 'never' force it."""
+    view = {"ahead_min_dist": ahead, "sectors": sectors, "openings": openings}
+    detailed = rays_mode == "always" or (rays_mode == "auto" and (
+        obs.get("door_ahead") or obs.get("blocked") or mem.stalled(PROGRESS_STEPS, GOING_NOWHERE)))
+    if detailed:
+        view["rays"] = [{"b": w["bearing"], "d": w["dist"]} for w in obs.get("walls", [])]
+    return view
+
+
+def build_state(obs, mem, intent, map_win, rays_mode="auto"):
     sectors, openings, ahead = summarize_walls(obs.get("walls", []))
+    visible = obs.get("visible", [])
     enemies = [{"name": e["name"], "dist": e["dist"], "bearing": e["bearing"]}
-               for e in obs.get("visible", [])]
+               for e in hostiles(visible)]
+    hazards = [{"name": e["name"], "dist": e["dist"], "bearing": e["bearing"]}
+               for e in visible if e["name"] in NON_HOSTILE]
+    ahead = obstacle_ahead(ahead, hazards)
+    door = obs.get("door_ahead")
+    if door:
+        door = dict(door)
+        w = mem.door_work
+        p = door_world_pos(obs)
+        if w and p is not None and w["level"] == level_of(obs) and _near(p, w):
+            door["presses"] = w["tries"]
+            door["tics_since_press"] = mem.game_tics - w["tic"]
+        if is_dead_door(obs, mem):
+            door["wont_open"] = True
+    moved = mem.net_displacement(PROGRESS_STEPS)
+    aim = None
+    if enemies:
+        tgt = min(enemies, key=lambda e: abs(e["bearing"]))
+        aim = {"enemy": tgt["name"], "bearing": tgt["bearing"], "dist": tgt["dist"],
+               "on_target": abs(tgt["bearing"]) <= AIM_CONE and tgt["dist"] <= AIM_HOLD_DIST
+                            and obs["ammo"] != 0}
     state = {
         "legend": STATE_LEGEND,
         "player": {
@@ -645,13 +965,19 @@ def build_state(obs, mem, intent, map_win):
             "heading": obs["angle"],
             "level": f"E{obs['episode']}M{obs['map']}",
         },
-        "view": {"ahead_min_dist": ahead, "sectors": sectors, "openings": openings},
+        "view": view_of(obs, sectors, openings, ahead, mem, rays_mode),
+        "way_out": way_out(sectors, openings),
         "enemies_in_view": enemies,
-        "door_ahead": obs.get("door_ahead"),
+        "aim": aim,
+        "hazards_in_view": hazards,
+        "door_ahead": door,
         "blocked_last_move": bool(obs.get("blocked")),
         "consecutive_blocked": mem.consecutive_blocked,
         "recent_actions": list(mem.recent),
         "same_action_streak": mem.same_streak,
+        "dithering": is_oscillating(mem.recent),
+        "progress": {"moved_last_10_steps": None if moved is None else round(moved),
+                     "going_nowhere": moved is not None and moved < GOING_NOWHERE},
         "steps": mem.steps,
         "commander": intent.to_state(obs["angle"]),
     }
@@ -667,7 +993,7 @@ def build_state(obs, mem, intent, map_win):
 # Policy: turn Jev's answers into one firmware action
 # ----------------------------------------------------------------------------
 
-def pick_macro(answers, policy, min_conf, rng):
+def pick_macro(answers, policy, min_conf, rng, allow_sample=True):
     a = answers["action"]
     probs = a.get("probabilities") or {}
     choice = a.get("choice")
@@ -676,9 +1002,17 @@ def pick_macro(answers, policy, min_conf, rng):
     if choice not in MACROS:
         choice = max(valid, key=valid.get) if valid else "wait"
     sampled = False
-    if valid and (policy == "sample" or (policy == "mixed" and conf < min_conf)):
-        names = list(valid)
-        weights = [max(valid[n], 0.0) for n in names]
+    # `mixed` (default) samples from Jev's distribution when it is unsure, for
+    # exploration - but NOT while stuck (blocked / going nowhere): rolling the dice
+    # right there is what makes the marine flail (a random turn_around 180 twice = a
+    # ~360 spin). There we take Jev's own top choice. `--policy sample` still always
+    # samples (an explicit opt-in to exploration).
+    if valid and (policy == "sample" or (policy == "mixed" and allow_sample and conf < min_conf)):
+        # never let a random draw pick turn_around: a 180 flip is a last resort, wrong
+        # unless it is Jev's actual top choice; sampling into it is what spins the marine
+        pool = {n: w for n, w in valid.items() if n != "turn_around" or choice == "turn_around"}
+        names = list(pool)
+        weights = [max(pool[n], 0.0) for n in names]
         if sum(weights) > 0:
             choice = rng.choices(names, weights=weights, k=1)[0]
             sampled = True
@@ -702,6 +1036,7 @@ OPPOSITES = {  # macro -> the macro that undoes it (dithering pairs)
 SIDE_OF = {**{m: "L" for m in TURN_MACROS_LEFT}, **{m: "R" for m in TURN_MACROS_RIGHT},
            "strafe_left": "sL", "strafe_right": "sR", "forward": "F", "back": "B"}
 MOVE_MACROS = {m for m, d in MACROS.items() if d["action"].get("move") or d["action"].get("strafe")}
+STRAIGHT_MOVES = {m for m in MOVE_MACROS if not MACROS[m]["action"].get("turn")}
 
 
 def is_oscillating(recent, n=4):
@@ -720,22 +1055,30 @@ def break_oscillation(obs, mem):
     """Replacement macro when the reflexes dither left/right in front of something."""
     door = obs.get("door_ahead")
     ahead = min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6), default=RAY_RANGE)
-    if door and door["dist"] < 80 and abs(door["bearing"]) <= 25:
+    if door and door["dist"] < 80 and abs(door["bearing"]) <= 25 and not is_dead_door(obs, mem):
         return "use"
     if ahead >= 100:
         return "forward"
     return unstick_macro(obs, mem)
 
 
-def unstick_macro(obs, mem):
-    """Safety net when Jev keeps walking into the same wall."""
+def unstick_macro(obs, mem, allow_use=True):
+    """Safety net when Jev keeps walking into the same wall (or goes nowhere):
+    try a close door, else turn toward the most open direction (or go, if that is
+    straight ahead). `allow_use=False` where pressing USE again is not wanted."""
     sectors, openings, ahead = summarize_walls(obs.get("walls", []))
     sect = {s["sector"]: s["max_dist"] for s in sectors}
     door = obs.get("door_ahead")
-    if door and door["dist"] < 80 and abs(door["bearing"]) <= 25 and mem.recent and mem.recent[-1] != "use":
+    if allow_use and door and door["dist"] < 80 and abs(door["bearing"]) <= 25 and \
+            mem.recent and mem.recent[-1] != "use" and not is_dead_door(obs, mem):
         return "use"
+    # nothing in the way straight ahead (e.g. the door in front just opened): go, do
+    # not turn away from it. Barrels are not in `walls`, so check things too.
+    thing_ahead = any(t["dist"] < 128 and abs(t["bearing"]) <= 15 for t in obs.get("visible", []))
     if openings:
         o = max(openings, key=lambda o: o["dist"])
+        if abs(o["bearing"]) <= 10 and not thing_ahead and not obs.get("blocked"):
+            return "forward"
         return "turn_left" if o["bearing"] < 0 else "turn_right"
     left = max(sect["left"], sect["far_left"])
     right = max(sect["right"], sect["far_right"])
@@ -1118,16 +1461,89 @@ class JsonlLog:
         self.f.close()
 
 
+# The macro Jev picked, shown as a compass-style glyph + short name, for the live line.
+ACTION_GLYPH = {
+    "forward": "^", "forward_long": "^^", "forward_left": "<^", "forward_right": "^>",
+    "turn_left": "<-", "turn_right": "->", "turn_left_small": "<", "turn_right_small": ">",
+    "turn_around": "<->", "back": "v", "strafe_left": "[<", "strafe_right": ">]",
+    "use": "()", "wait": "..",
+}
+_BARS = ".:-=+*#"      # 7 heights, ASCII (renders anywhere); every cell stays visible
+SECTOR_ORDER = ["far_left", "left", "centre_left", "ahead", "centre_right", "right", "far_right"]
+
+
+def radar(obs):
+    """A 7-cell depth bar of what Jev sees left->right (taller/greener = more open),
+    the centre cell = straight ahead. Purely for the on-camera terminal."""
+    sect = {s: RAY_RANGE for s in SECTOR_ORDER}
+    for name, lo, hi in SECTORS:
+        rays = [w["dist"] for w in obs.get("walls", [])
+                if (lo <= w["bearing"] <= hi if lo == -45 else lo < w["bearing"] <= hi)]
+        if rays:
+            sect[name] = min(rays)
+    cells = []
+    for i, name in enumerate(SECTOR_ORDER):
+        d = sect[name]
+        h = max(0, min(len(_BARS) - 1, int(d / 130)))   # near->far mapped to '.'..'#'
+        col = "bred" if d < 120 else ("byel" if d < 350 else "bgrn")
+        cells.append(c(_BARS[h], col, "bold") if i == 3 else c(_BARS[h], col))
+    return c("[", "dim") + "".join(cells) + c("]", "dim")
+
+
+def radar_key():
+    """One-line legend for the live step line (printed once at start)."""
+    bar = c("[", "dim") + c(".", "bred") + c("-", "byel") + c("=", "byel") + c("#", "bgrn") + c("]", "dim")
+    return (f"{bar} depth L..R (" + c("near", "bred") + "->" + c("far", "bgrn") + ", centre=ahead)  "
+            + c("ah", "grn") + " clear-ahead  " + c("=> ^ macro", "bcyn", "bold") + " decision  "
+            + c("FIRE", "bred", "bold") + "  c=confidence  then what's in view ("
+            + c("AIM", "bred", "bold") + "=on target)")
+
+
 def fmt_step(mem, obs, macro, conf, fire_p, fired, latency, flags, intent):
+    visible = obs.get("visible", [])
+    enemies = hostiles(visible)
+    hazards = [e for e in visible if e["name"] in NON_HOSTILE]
+    wall_ahead = min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6), default=0)
+    ahead = obstacle_ahead(wall_ahead, hazards)   # what Jev sees: clearance incl. barrels
+    moved = mem.net_displacement(PROGRESS_STEPS)
+
+    # Fixed-width columns first (so they line up vertically on video); the
+    # variable-length "what's in view" tags trail at the end, where ragged is fine.
+    step_s = c(f"{mem.steps:4d}", "dim")
+    hp_s = c(f"hp{obs['health']:<3d}", "grn" if obs["health"] > 40 else "bred")
+    ah_s = c(f"ah{ahead:<4d}", "grn" if ahead >= 350 else ("yel" if ahead >= 120 else "red"))
+    glyph = ACTION_GLYPH.get(macro, "?")
+    act = c(f"{glyph:>3} {macro:<16}", "bcyn", "bold")
+    fire_s = c("FIRE", "bred", "bold") if fired else c(" -- ", "dim")
+    conf_s = c(f"c{conf:4.2f}", "dim")
+    mv_s = c(f"mv{('--' if moved is None else round(moved)):>4}", "dim")
+    ms_s = c(f"{latency * 1000:4.0f}ms", "dim")
+
+    tags = []
+    if enemies:
+        e = min(enemies, key=lambda e: abs(e["bearing"]))
+        on_tgt = abs(e["bearing"]) <= AIM_CONE and e["dist"] <= AIM_HOLD_DIST and obs["ammo"] != 0
+        t = f"{e['name']} {e['dist']}@{e['bearing']:+d}"
+        tags.append(c("AIM " + t, "bred", "bold") if on_tgt else c("en " + t, "byel"))
+    if hazards:
+        h = hazards[0]
+        tags.append(c(f"barrel {h['dist']}@{h['bearing']:+d}", "bmag"))
     door = obs.get("door_ahead")
-    door_s = f"{door['dist']}@{door['bearing']:+d}" if door else "-"
-    enemies = obs.get("visible", [])
-    en_s = f"{len(enemies)}" + (f"({enemies[0]['name']} {enemies[0]['dist']}@{enemies[0]['bearing']:+d})" if enemies else "")
-    ahead = min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6), default=0)
-    flag_s = (" " + " ".join(flags)) if flags else ""
-    return (f"[{mem.steps:4d}] {latency*1000:4.0f}ms hp={obs['health']:3d} ammo={obs['ammo']:3d} "
-            f"hd={obs['angle']:3d} | {macro:<16} c={conf:.2f} fire={fire_p:.2f}{'*' if fired else ' '} "
-            f"| ahead={ahead:4d} en={en_s} door={door_s} blk={mem.consecutive_blocked}{flag_s}")
+    if door:
+        ds = f"door {door['dist']}@{door['bearing']:+d}"
+        w = mem.door_work
+        p = door_world_pos(obs)
+        if w and p is not None and _near(p, w):
+            ds += f"(x{w['tries']})"
+        if is_dead_door(obs, mem):
+            ds += "!"
+        tags.append(c(ds, "red" if is_dead_door(obs, mem) else "bcyn"))
+    if obs.get("blocked"):
+        tags.append(c("BLOCKED", "bred", "bold"))
+    tag_s = ("  " + "  ".join(tags)) if tags else ""
+    flag_s = ("  " + c(" ".join(flags), "mag")) if flags else ""
+    return (f"{step_s} {hp_s} {radar(obs)} {ah_s}  {c('=>', 'dim')} {act} {fire_s} {conf_s}  "
+            f"{mv_s} {ms_s}{tag_s}{flag_s}")
 
 
 # ----------------------------------------------------------------------------
@@ -1246,7 +1662,7 @@ def run(args):
     else:
         try:
             jev = JevClient(args.jev_url, args.jev_key or os.environ.get("TYPESAFE_API_KEY"),
-                            args.jev_model, timeout=args.jev_timeout)
+                            args.jev_model, timeout=args.jev_timeout, user_agent=args.jev_user_agent)
         except JevError as e:
             sys.exit(f"error: {e}")
     dry_fallback = DryJev()
@@ -1341,10 +1757,12 @@ def run(args):
             supervisor.start()
             supervisor.wake.set()
         say(f"mode={args.mode}  decisions={jev.name}  supervisor={supervisor.name_str if supervisor else 'none'}  "
-            f"policy={args.policy} min_conf={args.min_confidence} speed={args.speed}  "
+            f"policy={args.policy} min_conf={args.min_confidence} nets={args.nets} speed={args.speed}  "
             f"pacing={'realtime (free-running)' if args.realtime else 'lockstep'}")
         say(f"player at ({obs['x']},{obs['y']}) heading {obs['angle']} E{obs['episode']}M{obs['map']} "
             f"hp={obs['health']} weapon={obs['weapon']} ammo={obs['ammo']}")
+        if not args.quiet:
+            say(c("  line: ", "dim") + radar_key())
 
         t_start = time.time()
         jev_retry_at = 0.0          # >0: Jev failed, don't call it again before this time
@@ -1353,6 +1771,7 @@ def run(args):
         dead, dead_since = False, 0.0
         realtime_warned = False
         frozen_hint_t = 0.0
+        last_map_print_t = 0.0
         while True:
             if args.steps and mem.steps >= args.steps:
                 break
@@ -1395,12 +1814,18 @@ def run(args):
                 else:
                     dead = False
 
+                door_st = door_status(obs, mem)
+                if door_st == "dead":
+                    say(f"  [game] the door ahead stayed shut after {DOOR_MAX_TRIES} presses of USE (locked, or "
+                        f"not a real door): telling Jev it won't open (door_ahead.wont_open) for a while")
+                    flags.append("door-noted")
+
                 if system_macro is not None:
                     macro = system_macro
                 else:
                     # ---- decide (Jev) ------------------------------------------------
                     map_win = map_window(map_json) if map_json else None
-                    state = build_state(obs, mem, intent, map_win)
+                    state = build_state(obs, mem, intent, map_win, args.view_rays)
                     questions = build_questions(intent)
                     t0 = time.perf_counter()
                     if jev_retry_at and time.time() < jev_retry_at:
@@ -1431,35 +1856,90 @@ def run(args):
                     latency = time.perf_counter() - t0
                     jev_latency = latency if "FALLBACK" not in flags else None
 
-                    macro, conf, sampled = pick_macro(answers, args.policy, args.min_confidence, rng)
+                    stuck_now = bool(obs.get("blocked")) or mem.stalled(PROGRESS_STEPS, GOING_NOWHERE)
+                    macro, conf, sampled = pick_macro(answers, args.policy, args.min_confidence, rng,
+                                                      allow_sample=not stuck_now)
                     if sampled:
                         flags.append("sampled")
                     fire_p = fire_probability(answers)
                     fire = fire_p >= args.fire_threshold and obs["ammo"] != 0
 
-                    # Safety nets (deterministic, always flagged in the telemetry):
+                    # Safety nets (deterministic, always flagged in the telemetry). With the
+                    # default `--nets doom` only the two Doom mechanics a single frame
+                    # cannot show (USE reach, USE toggling a rising door) are enforced;
+                    # everything else is Jev's call, from the memory facts in its state
+                    # (door_ahead.presses / tics_since_press / wont_open, progress,
+                    # dithering). `--nets all` adds the older behaviour nets below, which
+                    # override Jev instead; `--nets none` is pure Jev.
+                    mech = args.nets in ("doom", "all")
+                    extra = args.nets == "all"
+                    # - two turn_arounds in a row put you back where you started (a 360
+                    #   spin that goes nowhere): the second one is a no-op, so head for
+                    #   the most open direction instead. A Doom mechanic, not strategy.
+                    if mech and macro == "turn_around" and mem.recent and mem.recent[-1] == "turn_around":
+                        macro = unstick_macro(obs, mem, allow_use=False)
+                        if macro == "turn_around":     # boxed in: don't 180 again, probe forward/sideways
+                            wall_ahead = min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6),
+                                             default=RAY_RANGE)
+                            macro = "forward" if wall_ahead >= 120 and not obs.get("blocked") else "turn_right"
+                        mem.heuristic_overrides += 1
+                        flags.append("no-spin")
                     # - repeated blocked moves -> turn toward the most open direction
-                    if args.heuristics and mem.consecutive_blocked >= args.unstick_after and macro in MOVE_MACROS:
+                    if extra and mem.consecutive_blocked >= args.unstick_after and macro in MOVE_MACROS:
                         macro = unstick_macro(obs, mem)
                         mem.heuristic_overrides += 1
                         flags.append("unstick")
-                    # - left/right (or forward/back) dithering with nothing in view -> commit
-                    #   (in a fight, dodging back and forth is legitimate)
-                    if args.heuristics and macro in SIDE_OF and not obs.get("visible") and \
+                    # - left/right (or forward/back) dithering with no enemy in view -> commit
+                    #   (in a fight, dodging back and forth is legitimate; a barrel is not a
+                    #   fight - trying to "centre" one is exactly how the marine gets stuck)
+                    no_enemy = not hostiles(obs.get("visible", []))
+                    if extra and macro in SIDE_OF and no_enemy and \
                             is_oscillating(list(mem.recent) + [macro]):
                         macro = break_oscillation(obs, mem)
                         mem.heuristic_overrides += 1
                         flags.append("anti-osc")
+                    # - going nowhere for a while (dithering, spinning, waiting or pushing in
+                    #   place) with no enemy in view -> turn toward the most open direction
+                    #   (or USE a never-tried door right ahead), then give Jev a full window
+                    #   before trying again. Not while working a door: waiting for one to
+                    #   rise is not being stuck, and turning away just as it opens is how
+                    #   the marine ends up walking back and forth.
+                    if door_st in ("working", "retry"):
+                        mem.last_stall_step = mem.steps     # and a full window once the door is open
+                    if extra and no_enemy and door_st not in ("working", "retry") and \
+                            args.stall_steps > 0 and mem.steps - mem.last_stall_step >= args.stall_steps and \
+                            mem.stalled(args.stall_steps, args.stall_radius):
+                        macro = unstick_macro(obs, mem)
+                        mem.last_stall_step = mem.steps
+                        mem.heuristic_overrides += 1
+                        flags.append("stall")
+                    # - the door we pressed USE on is still shut DOOR_RETRY_TICS later: the
+                    #   press did not take -> press again (or step back into reach first)
+                    if extra and no_enemy and door_st == "retry":
+                        d = obs["door_ahead"]
+                        if d["dist"] <= DOOR_REACH and abs(d["bearing"]) <= 20:
+                            macro = "use"
+                        else:
+                            macro = "forward" if abs(d["bearing"]) <= 12 else \
+                                ("forward_left" if d["bearing"] < 0 else "forward_right")
+                        mem.heuristic_overrides += 1
+                        flags.append("door-retry")
+                    # - a door already found shut after a USE in reach (locked, or not a real
+                    #   door): going back to press USE on it is how the marine loops -> turn away
+                    if extra and macro == "use" and is_dead_door(obs, mem):
+                        macro = unstick_macro(obs, mem, allow_use=False)
+                        mem.heuristic_overrides += 1
+                        flags.append("dead-door")
                     # - USE only reaches 64 units: a `use` on a far door becomes a step toward it
                     door = obs.get("door_ahead")
-                    if args.heuristics and macro == "use" and door and door["dist"] > 80:
+                    if mech and macro == "use" and door and door["dist"] > 80 and not is_dead_door(obs, mem):
                         macro = "forward" if abs(door["bearing"]) <= 12 else \
                             ("forward_left" if door["bearing"] < 0 else "forward_right")
                         mem.heuristic_overrides += 1
                         flags.append("approach-door")
                     # - Doom's USE toggles doors: pressing it again while the door is still
                     #   rising sends it back DOWN. After a `use`, hold off for ~30 game tics.
-                    if args.heuristics and macro == "use" and mem.last_use_tic is not None and \
+                    if mech and macro == "use" and mem.last_use_tic is not None and \
                             (mem.game_tics - mem.last_use_tic) < args.use_cooldown:
                         macro = "wait"
                         flags.append("door-wait")
@@ -1484,6 +1964,7 @@ def run(args):
                     continue
                 if macro == "use":
                     mem.last_use_tic = mem.game_tics
+                    note_door_attempt(obs, mem)     # obs = what the USE was aimed at
                 if args.realtime:
                     mem.game_tics = int((time.time() - t_start) * TICRATE)   # the game runs on the wall clock
                     if action["tics"] >= 6:
@@ -1498,9 +1979,12 @@ def run(args):
                 else:
                     mem.game_tics += action["tics"] + catchup + 1
 
-                # frozen-game detector: nothing at all changed although we pressed something
+                # frozen-game detector: nothing at all changed although we pressed something.
+                # A straight move that came back `blocked` proves nothing (walking into a
+                # wall or a barrel changes nothing either): only turns, USE, etc. count.
                 same = all(new_obs.get(k) == obs.get(k) for k in ("x", "y", "angle", "health", "ammo", "armor"))
-                if same and macro != "wait":
+                pushing = new_obs.get("blocked") and macro in STRAIGHT_MOVES
+                if same and macro != "wait" and not pushing:
                     mem.frozen_steps += 1
                 elif not same:
                     if mem.frozen_steps >= args.frozen_after:
@@ -1521,8 +2005,16 @@ def run(args):
                     map_json, _ = link.get_map()
                     last_reply_t = time.perf_counter()
                     mem.coverage_history.append((time.time(), map_coverage(map_json)))
-                    if args.show_map_every and mem.steps % args.show_map_every == 0 and not args.quiet:
+                # print the automap on a wall-clock cadence (--show-map-secs) or, failing
+                # that, every N steps (--show-map-every)
+                if not args.quiet and map_json is not None:
+                    if args.show_map_secs > 0:
+                        due = time.time() - last_map_print_t >= args.show_map_secs
+                    else:
+                        due = args.show_map_every and mem.steps % args.show_map_every == 0
+                    if due:
                         say(render_map(map_json, new_obs["angle"]))
+                        last_map_print_t = time.time()
 
                 obs = new_obs
                 shared.publish(obs, mem, map_json)
@@ -1575,7 +2067,8 @@ def run(args):
         print(f"decisions {jev.name}: {mem.jev_calls} calls, {mem.jev_errors} errors, avg latency {lat*1000:.0f} ms, "
               f"{mem.jev_tokens} input tokens (~${mem.jev_tokens / 1e6 * JEV_PRICE_PER_MTOK:.3f})")
         print(f"blocked {mem.blocked_total}  safety-net overrides {mem.heuristic_overrides}  fallback decisions "
-              f"{mem.fallbacks}  uses {mem.uses}  deaths {mem.deaths}  reconnects {mem.reconnects}  "
+              f"{mem.fallbacks}  uses {mem.uses}  doors that did not open {len(mem.dead_doors)}  "
+              f"deaths {mem.deaths}  reconnects {mem.reconnects}  "
               f"levels {' > '.join(mem.levels) or '-'}")
         print(f"enemies seen (step-count) {dict(mem.enemies_seen)}")
         if supervisor:
@@ -1601,10 +2094,17 @@ def main():
     g.add_argument("--jev-key", help="TypeSafe API key (default: env TYPESAFE_API_KEY)")
     g.add_argument("--jev-timeout", type=float, default=2.0,
                    help="HTTP timeout per decision, seconds (keep it well under the board's 5 s agent watchdog)")
+    g.add_argument("--jev-user-agent", default=os.environ.get("TYPESAFE_USER_AGENT", JEV_DEFAULT_USER_AGENT),
+                   help="User-Agent header for the API request (the default is a browser UA; "
+                        "urllib's own UA trips Cloudflare bot protection, HTTP 403 error 1010)")
     g.add_argument("--policy", choices=["argmax", "sample", "mixed"], default="mixed",
                    help="argmax = Jev's choice; sample = sample from its probabilities; "
                         "mixed = argmax unless confidence < --min-confidence (default)")
     g.add_argument("--min-confidence", type=float, default=0.35)
+    g.add_argument("--view-rays", choices=["auto", "always", "never"], default="auto",
+                   help="send the full 51-ray depth fan (in view.rays) on top of the 7 sectors: "
+                        "auto = only near a door or when stuck (default; the extra detail helps line up "
+                        "on narrow doorways, ~+750 tokens only then), always, or never")
     g.add_argument("--fire-threshold", type=float, default=0.5, help="hold FIRE when P(fire) >= this")
 
     s = ap.add_argument_group("Supervisor (System Two, --mode supervised)")
@@ -1627,11 +2127,20 @@ def main():
                         "the default; 0..4 = fixed)")
     p.add_argument("--step-delay", type=float, default=0.0, help="extra sleep per step, seconds (slow-motion)")
     p.add_argument("--max-rate", type=float, default=10.0, help="cap on decisions per second (0 = uncapped)")
-    p.add_argument("--heuristics", dest="heuristics", action="store_true", default=True)
-    p.add_argument("--no-heuristics", dest="heuristics", action="store_false",
-                   help="disable the safety nets (unstick, anti-oscillation, door approach, USE cooldown): pure Jev. "
-                        "Death / end-of-level handling stays on")
-    p.add_argument("--unstick-after", type=int, default=4, help="consecutive blocked moves before the unstick net kicks in")
+    p.add_argument("--nets", choices=["doom", "all", "none"], default="doom",
+                   help="deterministic safety nets over Jev's choice. doom (default) = only the Doom mechanics a frame "
+                        "cannot show: a `use` on a far door becomes a step toward it, a second `use` while the door "
+                        "rises becomes `wait`; all = also override Jev when stuck (unstick, anti-oscillation, stall, "
+                        "door retry, locked door); none = pure Jev. Death / end-of-level handling is always on")
+    p.add_argument("--no-heuristics", dest="nets", action="store_const", const="none", help="same as --nets none")
+    p.add_argument("--unstick-after", type=int, default=4,
+                   help="--nets all: consecutive blocked moves before the unstick net kicks in")
+    p.add_argument("--stall-steps", type=int, default=PROGRESS_STEPS,
+                   help="--nets all: decisions without real progress (see --stall-radius), no enemy in view, before "
+                        "the stall net turns the marine toward open space; also its cooldown. 0 = off")
+    p.add_argument("--stall-radius", type=float, default=float(GOING_NOWHERE),
+                   help="--nets all: net displacement (map units) over --stall-steps below which the marine counts "
+                        "as stalled")
     p.add_argument("--use-cooldown", type=int, default=30,
                    help="game tics after a `use` during which another `use` becomes `wait` (a door needs ~28 tics to rise clear; "
                         "pressing USE again while it rises sends it back down)")
@@ -1639,6 +2148,9 @@ def main():
                    help="steps with no change at all before pressing USE (end-of-level screen) and warning")
     p.add_argument("--map-every", type=int, default=6, help="refresh the automap every N steps (0 = never)")
     p.add_argument("--show-map-every", type=int, default=30, help="print the automap every N steps (0 = never)")
+    p.add_argument("--show-map-secs", type=float, default=0.0,
+                   help="print the automap on a wall-clock cadence, every N seconds (0 = off, use --show-map-every "
+                        "instead); handy in realtime mode where steps/second vary")
 
     r = ap.add_argument_group("Run control")
     r.add_argument("--check", action="store_true",
@@ -1649,12 +2161,16 @@ def main():
     r.add_argument("--seed", type=int, default=None)
     r.add_argument("--log", help="append per-step JSONL telemetry to this file")
     r.add_argument("--quiet", action="store_true")
+    r.add_argument("--color", choices=["auto", "always", "never"], default="auto",
+                   help="colour the live step line (radar of what Jev sees + the macro it chose): "
+                        "auto = on when the output is a terminal (default), always, or never")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):      # Windows consoles/pipes: never crash on a character
         try:
             stream.reconfigure(errors="replace")
         except Exception:
             pass
+    enable_color(args.color)
 
     if args.show_map_every and args.map_every and args.show_map_every % args.map_every:
         args.show_map_every = args.map_every * max(1, round(args.show_map_every / args.map_every))

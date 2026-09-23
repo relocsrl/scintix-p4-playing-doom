@@ -62,6 +62,20 @@ static volatile bool s_agent_active;
 static volatile bool s_doom_ready;
 static int s_agent_idle_ms;
 
+/* Realtime (free-running) agent mode: the keys of the last action stay held while
+ * the game keeps ticking; each request swaps them and is answered immediately.
+ * All of this runs on the Doom task except the two flags the WebSocket task sets. */
+static volatile bool s_agent_realtime;        /* current mode while an agent is active */
+static volatile bool s_agent_release_pending; /* WebSocket task asks: drop the held keys */
+static unsigned char s_agent_held[8];
+static int s_agent_held_n;
+static int s_agent_hold_until_tic;            /* gametic at which held keys auto-release */
+static int64_t s_agent_last_req_us;           /* for the idle watchdog in realtime mode */
+static fixed_t s_agent_rt_x, s_agent_rt_y;    /* player position at the previous request */
+static angle_t s_agent_rt_angle;
+static int s_agent_rt_tic;                    /* gametic at the previous request */
+static doom_agent_action_t s_agent_rt_prev;   /* the action that was held until this request */
+
 enum {
     DOOM_KEY_UP = 1U << 0,
     DOOM_KEY_DOWN = 1U << 1,
@@ -362,6 +376,38 @@ static void print_doom_banner(void)
            "         SCINTIX P4 — rip and tear!\n\n");
 }
 
+/* The set of Doom keys an agent action holds down (movement, fire, use and the
+ * weapon-select digit). `keys` must have room for 8. */
+static int agent_keys_for_action(const doom_agent_action_t *a, unsigned char *keys)
+{
+    int n = 0;
+    if (a->move > 0) {
+        keys[n++] = KEY_UPARROW;
+    } else if (a->move < 0) {
+        keys[n++] = KEY_DOWNARROW;
+    }
+    if (a->turn < 0) {
+        keys[n++] = KEY_LEFTARROW;
+    } else if (a->turn > 0) {
+        keys[n++] = KEY_RIGHTARROW;
+    }
+    if (a->strafe < 0) {
+        keys[n++] = KEY_STRAFE_L;
+    } else if (a->strafe > 0) {
+        keys[n++] = KEY_STRAFE_R;
+    }
+    if (a->fire) {
+        keys[n++] = KEY_FIRE;
+    }
+    if (a->use) {
+        keys[n++] = KEY_USE;
+    }
+    if (a->weapon >= 1 && a->weapon <= 7) {
+        keys[n++] = (unsigned char)('0' + a->weapon);
+    }
+    return n;
+}
+
 /* Inject the agent's action as held keys, advance the requested tics, then
  * release. Runs on the Doom task. A final tick is always run so the key
  * releases are processed and the captured frame is current. */
@@ -375,36 +421,11 @@ static void agent_apply_and_tick(const doom_agent_action_t *a)
         tics = 60;
     }
 
-    unsigned char held[6];
-    int n = 0;
-    if (a->move > 0) {
-        held[n++] = KEY_UPARROW;
-    } else if (a->move < 0) {
-        held[n++] = KEY_DOWNARROW;
-    }
-    if (a->turn < 0) {
-        held[n++] = KEY_LEFTARROW;
-    } else if (a->turn > 0) {
-        held[n++] = KEY_RIGHTARROW;
-    }
-    if (a->strafe < 0) {
-        held[n++] = KEY_STRAFE_L;
-    } else if (a->strafe > 0) {
-        held[n++] = KEY_STRAFE_R;
-    }
-    if (a->fire) {
-        held[n++] = KEY_FIRE;
-    }
-    if (a->use) {
-        held[n++] = KEY_USE;
-    }
-    unsigned char weapon_key = (a->weapon >= 1 && a->weapon <= 7) ? (unsigned char)('0' + a->weapon) : 0;
+    unsigned char held[8];
+    int n = agent_keys_for_action(a, held);
 
     for (int i = 0; i < n; i++) {
         queue_key_event(1, held[i]);
-    }
-    if (weapon_key) {
-        queue_key_event(1, weapon_key);
     }
     for (int i = 0; i < tics; i++) {
         doomgeneric_Tick();
@@ -412,10 +433,112 @@ static void agent_apply_and_tick(const doom_agent_action_t *a)
     for (int i = 0; i < n; i++) {
         queue_key_event(0, held[i]);
     }
-    if (weapon_key) {
-        queue_key_event(0, weapon_key);
-    }
     doomgeneric_Tick(); /* flush the key releases, refresh the frame */
+}
+
+/* --- realtime mode helpers (Doom task only) --------------------------------- */
+
+static void agent_capture_obs(doom_agent_obs_t *o); /* defined below */
+
+static void agent_release_held(void)
+{
+    for (int i = 0; i < s_agent_held_n; i++) {
+        queue_key_event(0, s_agent_held[i]);
+    }
+    s_agent_held_n = 0;
+}
+
+/* Swap the held key set for the new action's: release what is no longer held,
+ * press what is new, keep the rest down (no spurious release/press, so a held
+ * FIRE keeps its refire rhythm and USE is not re-triggered). */
+static void agent_realtime_apply(const doom_agent_action_t *a)
+{
+    unsigned char next[8];
+    int n = agent_keys_for_action(a, next);
+
+    for (int i = 0; i < s_agent_held_n; i++) {
+        bool still = false;
+        for (int j = 0; j < n; j++) {
+            if (next[j] == s_agent_held[i]) {
+                still = true;
+                break;
+            }
+        }
+        if (!still) {
+            queue_key_event(0, s_agent_held[i]);
+        }
+    }
+    for (int j = 0; j < n; j++) {
+        bool was = false;
+        for (int i = 0; i < s_agent_held_n; i++) {
+            if (s_agent_held[i] == next[j]) {
+                was = true;
+                break;
+            }
+        }
+        if (!was) {
+            queue_key_event(1, next[j]);
+        }
+    }
+    memcpy(s_agent_held, next, sizeof(next));
+    s_agent_held_n = n;
+
+    int hold_tics = a->tics;
+    if (hold_tics < 1) {
+        hold_tics = 1;
+    }
+    if (hold_tics > 175) { /* 5 s: the longest a controller may go quiet while we keep moving */
+        hold_tics = 175;
+    }
+    s_agent_hold_until_tic = gametic + hold_tics;
+}
+
+/* `blocked` for realtime mode: did the player make progress along the axis the
+ * PREVIOUS action asked for, between the previous request and this one? Same
+ * projection as the lockstep path, but requests come only ~5 tics apart and a
+ * marine starting from rest covers just 0.78*n*(n+1)/2 units in n tics, so the
+ * threshold scales with the elapsed tics (n*n/3, clamped 3..16) instead of a
+ * flat 16. */
+static bool agent_realtime_blocked(const doom_agent_action_t *prev, mobj_t *pm)
+{
+    if (pm == NULL || (prev->move == 0 && prev->strafe == 0)) {
+        return false;
+    }
+    int elapsed = gametic - s_agent_rt_tic;
+    int thr = (elapsed * elapsed) / 3;
+    if (thr < 3) thr = 3;
+    if (thr > 16) thr = 16;
+    int dx = (pm->x - s_agent_rt_x) >> FRACBITS;
+    int dy = (pm->y - s_agent_rt_y) >> FRACBITS;
+    unsigned fa = s_agent_rt_angle >> ANGLETOFINESHIFT;
+    int fwd = (int)(((int64_t)dx * finecosine[fa] + (int64_t)dy * finesine[fa]) >> FRACBITS);
+    int side = (int)(((int64_t)dx * finesine[fa] - (int64_t)dy * finecosine[fa]) >> FRACBITS);
+    bool blk = true;
+    if (prev->move > 0 && fwd >= thr) blk = false;
+    if (prev->move < 0 && fwd <= -thr) blk = false;
+    if (prev->strafe != 0 && (side >= thr || side <= -thr)) blk = false;
+    return blk;
+}
+
+static void agent_realtime_step(const doom_agent_action_t *a)
+{
+    player_t *pl = &players[consoleplayer];
+    bool prev_blocked = agent_realtime_blocked(&s_agent_rt_prev, pl->mo);
+
+    agent_realtime_apply(a);
+    doomgeneric_Tick(); /* one frame so the new keys are in the ticcmd; the game is running anyway */
+    agent_capture_obs(&s_agent_obs);
+    if (s_agent_obs.valid) {
+        s_agent_obs.blocked = prev_blocked;
+    }
+
+    if (pl->mo != NULL) {
+        s_agent_rt_x = pl->mo->x;
+        s_agent_rt_y = pl->mo->y;
+        s_agent_rt_angle = pl->mo->angle;
+    }
+    s_agent_rt_tic = gametic;
+    s_agent_rt_prev = *a;
 }
 
 /* Half of Doom's ~90-degree horizontal field of view: things outside this cone
@@ -753,6 +876,12 @@ void doom_agent_set_active(bool active)
 {
     s_agent_active = active;
     s_agent_idle_ms = 0;
+    if (!active) {
+        /* Called from the WebSocket task on disconnect: the Doom task owns the
+         * key queue, so just ask it to drop whatever the agent was holding. */
+        s_agent_realtime = false;
+        s_agent_release_pending = true;
+    }
 }
 
 static void doom_task(void *arg)
@@ -785,13 +914,40 @@ static void doom_task(void *arg)
     s_doom_ready = true;
 
     while (true) {
+        if (s_agent_release_pending) {
+            /* The agent went away (or left realtime mode): stop moving. */
+            s_agent_release_pending = false;
+            agent_release_held();
+        }
         if (s_agent_active) {
-            /* Lockstep: pause until the agent submits an action, advance, reply. */
-            if (xSemaphoreTake(s_agent_step_req, pdMS_TO_TICKS(200)) == pdTRUE) {
+            /* Lockstep: pause until the agent submits an action, advance, reply.
+             * Realtime: poll for a request, otherwise keep the game ticking with
+             * the last action's keys held. */
+            if (xSemaphoreTake(s_agent_step_req, s_agent_realtime ? 0 : pdMS_TO_TICKS(200)) == pdTRUE) {
                 s_agent_idle_ms = 0;
+                s_agent_last_req_us = esp_timer_get_time();
                 if (s_agent_req_kind == 1) {
                     agent_render_map(&s_agent_map);
+                } else if (s_agent_action.hold) {
+                    if (!s_agent_realtime) {
+                        ESP_LOGI(TAG, "agent: realtime (free-running) mode");
+                        s_agent_realtime = true;
+                        player_t *rpl = &players[consoleplayer];
+                        if (rpl->mo != NULL) {
+                            s_agent_rt_x = rpl->mo->x;
+                            s_agent_rt_y = rpl->mo->y;
+                            s_agent_rt_angle = rpl->mo->angle;
+                        }
+                        s_agent_rt_tic = gametic;
+                        memset(&s_agent_rt_prev, 0, sizeof(s_agent_rt_prev));
+                    }
+                    agent_realtime_step(&s_agent_action);
                 } else {
+                    if (s_agent_realtime) {
+                        ESP_LOGI(TAG, "agent: back to lockstep mode");
+                        s_agent_realtime = false;
+                        agent_release_held();
+                    }
                     player_t *apl = &players[consoleplayer];
                     fixed_t bx = apl->mo ? apl->mo->x : 0;
                     fixed_t by = apl->mo ? apl->mo->y : 0;
@@ -819,6 +975,20 @@ static void doom_task(void *arg)
                     }
                 }
                 xSemaphoreGive(s_agent_step_done);
+            } else if (s_agent_realtime) {
+                /* No request pending: the game runs on with the held keys. */
+                doomgeneric_Tick();
+                vTaskDelay(pdMS_TO_TICKS(1));
+                if (s_agent_held_n > 0 && gametic >= s_agent_hold_until_tic) {
+                    agent_release_held(); /* hold timeout: the controller is late, stop moving */
+                }
+                if (esp_timer_get_time() - s_agent_last_req_us > 5000000LL) {
+                    /* Controller vanished without closing — stop moving, resume local play. */
+                    agent_release_held();
+                    s_agent_realtime = false;
+                    s_agent_active = false;
+                    ESP_LOGW(TAG, "agent idle, resuming real-time play");
+                }
             } else {
                 s_agent_idle_ms += 200;
                 if (s_agent_idle_ms >= 5000) {

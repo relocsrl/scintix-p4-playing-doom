@@ -13,6 +13,26 @@ A port of DOOM running on the **SCINTIX P4**, our custom board based on the
 > which targets the Guition **JC4880P443** panel (ST7701S, 480×800). This fork
 > adapts that work to the **SCINTIX P4** hardware, whose display and wiring differ.
 
+## 🤖 AI plays DOOM (the `/agent` API)
+
+The firmware exposes an **`/agent` WebSocket** that gives an AI only what a human
+player can see — a fan of depth rays across the field of view, the enemies and
+items in line of sight, the door ahead, whether the last move was blocked — plus
+the normal controls. No internal game state, no shortcuts.
+
+Two players so far:
+
+- **Claude Sonnet** (an LLM), through an on-board **MCP** server, turn by turn.
+- **Jev** — TypeSafe's "System One" model — a fast, typed reflex controller that
+  decides in ~500 ms and plays in **real time** (optional free-running firmware mode).
+
+Jev has no memory between moves, so the Python agent builds the state it reads each
+step and folds in the short-term memory a reflex model lacks (recent actions, doors
+already tried, whether it's making progress), enough to keep it from looping.
+
+The agents, a board-free simulator and the full write-up live in [`tools/`](tools/) —
+start with [`tools/README.md`](tools/README.md) and [`docs/jev-agent-notes.md`](docs/jev-agent-notes.md).
+
 ## Target hardware (SCINTIX P4)
 
 - **MCU**: ESP32-P4 (rev. v3.1), 32 MB hex PSRAM, 32 MB flash.

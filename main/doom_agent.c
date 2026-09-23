@@ -49,6 +49,12 @@ static void parse_action(const char *txt, size_t len, doom_agent_action_t *a)
     if (cJSON_IsNumber(tics)) {
         a->tics = tics->valueint;
     }
+    /* {"hold": true} = realtime mode: keys stay held, game keeps running, reply
+     * at once; `tics` is then the auto-release timeout (default 1 s). */
+    a->hold = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "hold"));
+    if (a->hold && !cJSON_IsNumber(tics)) {
+        a->tics = 35;
+    }
     cJSON_Delete(root);
 }
 

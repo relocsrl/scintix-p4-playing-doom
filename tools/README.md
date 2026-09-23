@@ -153,20 +153,36 @@ for `--frozen-after 8` steps whatever it presses — the end-of-level stats scre
 it presses USE to move on (and tells you to press Esc on the keyboard if a menu is
 open); when the **Wi-Fi link drops** it reconnects (up to 10 attempts) and resumes.
 
-Every step prints one telemetry line:
+Every step prints one live line — a **radar of what Jev sees** and the **macro it
+chose**, colour-coded (nice next to the game on screen / on video):
 
 ```
-[  16]  123ms hp=100 ammo= 48 hd= 90 | use              c=0.60 fire=0.05  | ahead=  19 en=0 door=19@+0 blk=0
-[  61]  122ms hp=100 ammo= 17 hd= 46 | forward          c=0.83 fire=0.90* | ahead= 782 en=1(imp 245@+7) door=- blk=0 anti-osc
-  [supervisor stuck, 2.1s] goal: Head east along the corridor and open the door at its end | heading 90 | fire normal | weapon 3 | ...
+ 137 hp100 [.:# .  ]  ah931  AIM imp 1041@+1  door 979@+3  => < turn_left_small  FIRE  c0.59  mv214  407ms
 ```
-`c` = Jev's confidence on the macro, `fire` = P(hold fire) (`*` = fired), `ahead` =
-nearest wall straight ahead, `en` = enemies in view, `door` = `door_ahead`
-dist@bearing, `blk` = consecutive blocked moves. Trailing flags mark anything that
+Left to right: step, `hp`; the **radar** `[.:# .  ]` = the 7 depth sectors left→right,
+taller/greener = more open, dimmer/red = a near wall (the centre cell is straight
+ahead) — this is literally what Jev reads; `ah` = clear distance straight ahead (wall
+OR barrel); then the salient things in view — `en <name> dist@bearing` (yellow), or
+**`AIM …`** in red when the enemy is on target, `barrel …` (magenta), `door
+dist@bearing` (cyan; `(x2)` = pressed twice, `!` = won't open); `BLOCKED` if the last
+move hit something; then `=> <glyph> <macro>` = the decision (e.g. `^` forward, `->`
+turn_right, `()` use, `..` wait), **`FIRE`** in red when it shoots, `c` = confidence,
+`mv` = units moved over the last 10 decisions, and the model latency. A one-line key
+is printed once at the start. `--color auto` (default) colours it when the output is a
+terminal; `--color always` (for a recorder that isn't a TTY) or `never`. The automap
+(`--show-map-every`) still prints every N steps. In level 2 the supervisor's plan
+prints too:
+
+```
+  [supervisor stuck, 2.1s] goal: Head east along the corridor and open the door at its end | heading 90 | fire normal | ...
+```
+Trailing flags mark anything that
 was **not** Jev's own decision: `FALLBACK` (Jev unreachable → local policy, retried
 with backoff 1→15 s; a 401/403/4xx stops the retries), `sampled` (low confidence →
-sampled from Jev's probabilities), `unstick` / `anti-osc` / `approach-door` /
-`door-wait` (the deterministic safety nets, see below), `respawn` / `unfreeze`
+sampled from Jev's probabilities), `approach-door` / `door-wait` / `no-spin` (the
+always-on Doom mechanics; `no-spin` = a second turn_around in a row was replaced, it
+would only spin back), `unstick` / `anti-osc` / `stall` / `door-retry` / `dead-door`
+(only with `--nets all`; `door-noted` = a door just found not to open), `respawn` / `unfreeze`
 (death and end-of-level handling). `--log file.jsonl` records the full state sent, Jev's answers,
 the action and the observation for every step, plus every supervisor plan. Ctrl+C
 prints a summary (steps, game time, latency, tokens/cost, deaths, levels played,
@@ -176,25 +192,74 @@ plans) and the device resumes real-time play.
 
 The 51-ray depth fan is collapsed into **7 sectors** (`min/max` wall distance
 each) plus detected **openings** (rays much longer than their neighbours), the
-`visible` list, `door_ahead`, `blocked`, a short **memory** (last 8 macros,
-consecutive blocked count), a 9×25 **automap window** around the player, and the
-`commander` intent. Each option's *criteria* text says **when** that macro is the
-right one, e.g. `use`: "USE only reaches ~64 units, right when door_ahead is very
-close (dist < 70) and roughly centred". Macros: `forward`, `forward_long`,
-`forward_left/right`, `turn_left/right` (~30°), `turn_left/right_small` (~9°),
-`turn_around`, `back`, `strafe_left/right`, `use`, `wait`.
+`visible` list split into `enemies_in_view` (monsters) and `hazards_in_view`
+(barrels: obstacles to go around, never targets to centre), `door_ahead`, `blocked`,
+a short **memory** (last 8 macros, consecutive blocked count), a 9×25 **automap
+window** around the player, and the `commander` intent. Each option's *criteria*
+text says **when** that macro is the right one, e.g. `use`: "USE only reaches ~64
+units, right when door_ahead is very close (dist < 70) and roughly centred".
+Macros: `forward`, `forward_long`, `forward_left/right`, `turn_left/right` (~30°),
+`turn_left/right_small` (~9°), `turn_around`, `back`, `strafe_left/right`, `use`,
+`wait`.
 
-### Safety nets (deterministic, always flagged)
+**Memory Jev cannot see from one frame** is put into the state as plain facts, so
+Jev keeps deciding instead of being overridden:
 
-They exist because Doom has a few mechanics a reflex model cannot learn from one
-frame: **USE reaches only 64 units** (a `use` on a far door becomes a step toward
-it); **USE toggles a door** — pressing it again while it is still rising sends it
-back down (after a `use`, further `use` become `wait` for `--use-cooldown` 30
-tics); **dithering** left/right with nothing in view is broken after 4
-alternations; **N consecutive blocked moves** (`--unstick-after 4`) trigger a turn
-toward the most open direction. `--no-heuristics` disables them all (pure Jev);
+- `door_ahead.presses` / `tics_since_press` — you pressed USE on *this* door N
+  times, the last one this many game tics ago (35 tics = 1 s). A door that opens
+  is gone from `door_ahead` ~28 tics after the press, so `tics_since_press < 50`
+  means it is still rising (wait, do not press again — that sends it back down),
+  and `>= 50` with the door still there means the press did not take (press again).
+- `door_ahead.wont_open` — pressed 3 times and still shut: locked (needs a key) or
+  not a real door. Treat it as a wall; it clears after 2 minutes.
+- `progress.moved_last_10_steps` / `going_nowhere` (< 48 units) — how far you got
+  over the last 10 decisions; going nowhere = dithering, spinning, waiting or
+  pushing into something (turning in place is never `blocked`, so this is how Jev
+  learns it is stuck). `dithering` — the last macros alternate a move and its
+  opposite.
+- `view.ahead_min_dist` — how far the marine can actually walk straight before
+  hitting something, **wall OR barrel**. Barrels are not in the wall fan, so without
+  this the depth reads the wall *behind* a barrel and forward looks clear while the
+  marine plows into it.
+- `view.rays` — the **full 51-ray depth fan** (~1.8° apart), added on top of the 7
+  sectors only when it earns its ~+750 tokens: near a door or when stuck (`--view-rays
+  auto`, the default; `always` / `never` force it). An A/B (`compare_view.py`) found
+  the 7 sectors match the full fan on ~85 % of decisions — identical on every
+  committed action (door use/wait, hold-and-fire, forward) — differing only in
+  low-confidence steering near-ties; the one consistent win for the full fan is
+  **lining up on a narrow doorway** (higher confidence, less hesitation), so that is
+  exactly where `auto` sends it.
+- `aim` (nearest monster) with `aim.on_target` — the enemy is inside the gun's hit
+  cone (|bearing| ≤ 8) and within range: FIRE and hold heading, do not turn. At
+  ~0.7 s decision lag a turn to "centre better" acts on a stale bearing and
+  overshoots — that swing-past-and-back is what made the marine dance around an enemy.
+- `way_out` {bearing, dist, side, dead_end} — the most open direction in view. When
+  stuck (blocked / going nowhere), make one turn toward it and go forward instead of
+  spinning; `turn_around` is only for a `dead_end`, and never twice in a row (that
+  just returns you to where you started — enforced as the `no-spin` mechanic).
+
+### Safety nets (`--nets`)
+
+Two Doom mechanics a single frame genuinely cannot show are still enforced after
+Jev's choice (default `--nets doom`, each flagged in the telemetry):
+**USE reaches only 64 units** (a `use` on a far door becomes a step toward it);
+**USE toggles a door** — pressing it again while it rises sends it back down (after
+a `use`, another `use` within `--use-cooldown` 30 tics becomes `wait`). Everything
+else — getting unstuck, not dithering, retrying a door, giving up on a locked one —
+is Jev's own call from the memory facts above.
+
+`--nets all` restores the older behaviour, where the agent also **overrides** Jev
+when it looks stuck: unstick after `--unstick-after` 4 blocked moves, break
+left/right dithering, a stall net (turn toward open space when `going_nowhere` with
+no enemy, quiet while a door rises), USE-retry on a shut door, and a turn-away from
+a `wont_open` door. `--nets none` (alias `--no-heuristics`) is pure Jev, mechanics
+included. Death / end-of-level handling is always on regardless.
+
 `--policy sample` always samples from Jev's distribution instead of taking the
-argmax (more exploration); `--min-confidence` sets when `mixed` (default) samples.
+argmax (more exploration); `--min-confidence` sets when `mixed` (default) samples —
+but `mixed` does **not** sample while stuck (blocked or going nowhere): rolling the
+dice right there is what makes the marine flail, so it takes Jev's top choice
+instead. `--policy sample` still samples everywhere.
 
 ### Pacing: lockstep vs. real time
 
@@ -230,6 +295,17 @@ python doom_jev_agent.py localhost --port 8765 --jev dry --realtime   # against 
 The patch builds cleanly with ESP-IDF v5.5.4 for esp32p4 (same sdkconfig and
 components as this repo) but has **not yet run on the board** — treat it as a
 reviewed draft. Undo with `git checkout -- main/doom_agent.h main/doom_agent.c main/doom_port.c`.
+
+### Troubleshooting
+
+- **`HTTP 403 ... error_code: 1010` from Jev** — Cloudflare bot protection in front of
+  the API blocked the request, *not* a bad key. `urllib`'s default User-Agent
+  (`Python-urllib/x.y`) trips it; the client now sends a browser User-Agent by default,
+  which gets through (verified: default UA → 403/1010, browser UA → the API answers).
+  Override with `--jev-user-agent "..."` or `TYPESAFE_USER_AGENT` if needed. If it still
+  returns 1010 with a browser UA, the block is on the TLS fingerprint (urllib can't
+  spoof that) — reach the API through a browser-like client or a proxy.
+- **`HTTP 401/403` without a Cloudflare 1010 body** — the key is wrong or not enabled.
 
 ### Cost
 

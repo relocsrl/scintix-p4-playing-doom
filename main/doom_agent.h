@@ -21,6 +21,14 @@ typedef struct {
     bool use;
     int  weapon;  /* 0 = keep current, 1..7 = select */
     int  tics;    /* game tics to advance this step (clamped 0..60) */
+    /* Free-running ("realtime") mode: keep these keys HELD after replying and do
+     * not pause the game between requests. The observation is returned at once
+     * (after one tick, so the keys register) while the game keeps running; the
+     * next request swaps the held keys. `tics` becomes the auto-release timeout
+     * (clamped 1..175): if no new request arrives within that many game tics the
+     * keys are released, so a vanished controller never leaves the marine
+     * running into a wall. A request without `hold` returns to lockstep. */
+    bool hold;
 } doom_agent_action_t;
 
 /* A thing the player can actually SEE this frame: inside the rendered field of
@@ -86,8 +94,9 @@ esp_err_t doom_agent_register(httpd_handle_t server);
 /* Game-side hooks, implemented in doom_port.c (run on the Doom task):
  * - doom_agent_step: apply the action, advance the requested tics, capture the
  *   observation. Called from the WebSocket task; blocks until the step is done.
- * - doom_agent_set_active: enter/leave lockstep (the game pauses between steps
- *   while active; it free-runs otherwise). */
+ * - doom_agent_set_active: enter/leave agent control. In lockstep the game
+ *   pauses between steps; in realtime (action.hold) it keeps running with the
+ *   last keys held; with no agent it free-runs on the local controls. */
 bool doom_agent_step(const doom_agent_action_t *action, doom_agent_obs_t *obs);
 bool doom_agent_get_map(doom_agent_map_t *map);
 void doom_agent_set_active(bool active);
