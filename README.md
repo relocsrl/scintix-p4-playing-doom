@@ -173,11 +173,24 @@ idf.py build flash monitor
 The WAD and config live in the SPIFFS image (`storage` partition, ~12 MB), so the first
 flash takes a while.
 
+### Prebuilt binaries (no ESP-IDF needed)
+
+Each release ships ready-to-flash images in [`binaries/`](binaries/)
+(`scintix-p4-doom-vX.Y.Z/`), with a `flash.bat` and a `README.txt` holding the plain
+esptool commands. With Python and esptool 5.x (`pip install "esptool>=5"`):
+
+```bat
+binaries\scintix-p4-doom-v0.5.1\flash.bat COM5
+```
+
+`flash.bat COM5 app` updates the firmware only (keeps the WAD, Wi-Fi and settings);
+`flash.bat COM5 erase` wipes the board first.
+
 ## First boot
 
-- A colour **test pattern** is drawn to confirm the panel and MIPI link are alive, then
-  the game loads.
+- The screen stays black for a moment, then DOOM starts.
 - If colours look swapped/inverted, adjust them in the web settings page.
+- **Quit Game** restarts the board (there's no OS to quit to).
 
 ## Wi-Fi portal
 
