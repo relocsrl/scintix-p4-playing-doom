@@ -12,6 +12,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -25,6 +26,7 @@
 #include "doomstat.h"
 #include "doomdata.h"
 #include "d_items.h"
+#include "i_system.h"
 #include "m_fixed.h"
 #include "p_local.h"
 #include "r_main.h"
@@ -359,6 +361,18 @@ static bool wad_exists(void)
     }
     ESP_LOGI(TAG, "Found WAD: %s (%u bytes)", DOOM_WAD_PATH, (unsigned)st.st_size);
     return true;
+}
+
+/* d_main.c; not exported by any header. */
+extern int show_endoom;
+
+/* Quit Game: there is no OS to return to, so restart the board cleanly.
+ * Registered before Doom starts, so it runs last among Doom's exit hooks
+ * (after the config is saved and sound is shut down). */
+static void doom_quit_restart(void)
+{
+    ESP_LOGI(TAG, "Quit Game: restarting");
+    esp_restart();
 }
 
 /* Printed raw (not through ESP_LOG) so the figlet "Doom" font stays aligned in
@@ -895,8 +909,6 @@ static void doom_task(void *arg)
         return;
     }
 
-    ESP_ERROR_CHECK_WITHOUT_ABORT(panel_display_fill(0x0000));
-
     char *argv[] = {
         "doomgeneric",
         "-iwad", DOOM_WAD_PATH,
@@ -910,7 +922,11 @@ static void doom_task(void *arg)
 
     print_doom_banner();
     ESP_LOGI(TAG, "Starting Doom");
+    I_AtExit(doom_quit_restart, false);
     doomgeneric_Create(argc, argv);
+    /* No text-mode ENDOOM screen on this port, and D_Endoom() ends in exit(),
+     * which ESP-IDF turns into abort() (a panic reboot). */
+    show_endoom = 0;
     s_doom_ready = true;
 
     while (true) {

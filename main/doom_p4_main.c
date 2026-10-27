@@ -69,45 +69,6 @@ static bool s_wifi_started;
 static bool s_sta_netif_started;
 static bool s_ap_netif_started;
 
-static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
-{
-    return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
-}
-
-static void draw_test_pattern(esp_lcd_panel_handle_t panel)
-{
-    const int stripe_lines = 40;
-    uint16_t *stripe = heap_caps_malloc(BSP_LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (stripe == NULL) {
-        stripe = heap_caps_malloc(BSP_LCD_H_RES * stripe_lines * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
-    ESP_ERROR_CHECK(stripe == NULL ? ESP_ERR_NO_MEM : ESP_OK);
-
-    for (int y0 = 0; y0 < BSP_LCD_V_RES; y0 += stripe_lines) {
-        int lines = (BSP_LCD_V_RES - y0) < stripe_lines ? (BSP_LCD_V_RES - y0) : stripe_lines;
-        for (int y = 0; y < lines; y++) {
-            int screen_y = y0 + y;
-            for (int x = 0; x < BSP_LCD_H_RES; x++) {
-                uint8_t r = (uint8_t)((x * 255) / (BSP_LCD_H_RES - 1));
-                uint8_t g = (uint8_t)((screen_y * 255) / (BSP_LCD_V_RES - 1));
-                uint8_t b = (uint8_t)(((x / 40) ^ (screen_y / 40)) & 1 ? 255 : 32);
-
-                if (screen_y < 80) {
-                    r = 255;
-                    g = (x < BSP_LCD_H_RES / 2) ? 255 : 80;
-                    b = 0;
-                }
-
-                stripe[y * BSP_LCD_H_RES + x] = rgb565(r, g, b);
-            }
-        }
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, y0, BSP_LCD_H_RES, y0 + lines, stripe));
-    }
-
-    free(stripe);
-    ESP_LOGI(TAG, "Test pattern drawn");
-}
-
 static void url_decode(char *text)
 {
     char *read = text;
@@ -1003,7 +964,7 @@ void app_main(void)
     (void)lcd_panel_io; /* Doom draws straight to the panel; the command IO isn't needed here. */
     panel_display_set_panel(lcd_panel);
 
-    draw_test_pattern(lcd_panel);
+    /* The DPI frame buffers are zero-allocated, so the panel starts black. */
     ESP_ERROR_CHECK(bsp_display_backlight_on());
 
     ESP_LOGI(TAG, "Doom P4 bringup complete");
