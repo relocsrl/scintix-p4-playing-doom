@@ -131,8 +131,10 @@ def select_weapon(slot: int) -> dict:
 @mcp.tool(description=(
     "Get the in-game automap as ASCII art — the SAME information the player's own "
     "automap shows: only the walls already discovered by exploring, plus your "
-    "position. North is up. In `grid`: '#' = a discovered wall, '@' = you, ' ' = "
-    "not yet discovered / empty. Areas you haven't explored are blank, and no "
+    "position. North is up. In `grid`: '#' = a discovered wall (or a closed door / a "
+    "ledge too high to climb), ':' = a step edge you can walk over (stairs), '~' = "
+    "the edge of a damaging floor (nukage/slime), '@' = you, ' ' = "
+    "not yet discovered / open floor. Areas you haven't explored are blank, and no "
     "monsters or items are shown (the automap doesn't reveal them). Returns "
     "{grid:[rows], cols, rows, units_per_cell (map units per character), "
     "origin_x, origin_y (map coords of the top-left cell), player:{col,row,angle "

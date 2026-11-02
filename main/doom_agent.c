@@ -100,7 +100,24 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             }
             cJSON_AddNumberToObject(w, "bearing", o->walls[i].bearing_deg);
             cJSON_AddNumberToObject(w, "dist", o->walls[i].dist);
+            /* Floor facts, only when there is something to say (keeps the reply small). */
+            if (o->walls[i].rise > 0) {
+                cJSON_AddNumberToObject(w, "rise", o->walls[i].rise);
+            }
+            if (o->walls[i].hurt >= 0) {
+                cJSON_AddNumberToObject(w, "hurt", o->walls[i].hurt);
+            }
+            if (o->walls[i].safe >= 0) {
+                cJSON_AddNumberToObject(w, "safe", o->walls[i].safe);
+            }
             cJSON_AddItemToArray(walls, w);
+        }
+        /* Damaging floor under the player (absent = safe) and the radiation suit. */
+        if (o->floor_damage > 0) {
+            cJSON_AddNumberToObject(r, "floor_damage", o->floor_damage);
+        }
+        if (o->radsuit_tics > 0) {
+            cJSON_AddNumberToObject(r, "radsuit_tics", o->radsuit_tics);
         }
 
         /* Nearest closed door / passage in view (absent when none). Lets the agent
@@ -110,6 +127,9 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             if (d) {
                 cJSON_AddNumberToObject(d, "bearing", o->door_ahead_bearing);
                 cJSON_AddNumberToObject(d, "dist", o->door_ahead_dist);
+                if (o->door_ahead_lift) {
+                    cJSON_AddStringToObject(d, "kind", "lift");
+                }
             }
         }
         /* True when a requested move barely shifted the player (ran into something). */

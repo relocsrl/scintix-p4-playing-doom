@@ -194,6 +194,47 @@ configurations:
   latency) but each decision sees the result of the previous one. `--rt-pipelined`
   restores the old behaviour. Sim (DryJev): stale-after-turn 50% -> 0%; lockstep
   unchanged. **Not yet re-run on the board.**
+- **Invisible wall: pushing forever into an "open" direction (fixed 2026-11-02, L1 run):**
+  stuck 50+ decisions with `mv 0`, pattern `forward BLOCKED / turn_right / turn_left /
+  forward BLOCKED`, `ah465` every time. The firmware ray (`agent_ray_traverse`) stopped
+  only on one-sided/blocking lines or openings < 56 high, **not on a step up > 24 units**
+  (unwalkable in Doom), so the view read 465 open across a ledge; the panorama
+  ("latest look wins") re-learned 465 after every turn, so best_seen/way_out pointed
+  straight back at it. Two fixes: (a) agent: `Memory.note_walk_block` records the
+  heading of every forward/forward_long that comes back `blocked` (not with a monster
+  in the way), `mask_walk_blocks` lowers ray depths within +/-12 deg of it to 32 while
+  within 48 units of that spot (150 decisions), in place, so view/sectors/openings/
+  way_out/panorama all agree; `view.ahead_unwalkable` + legend sentence. Covers also
+  solid decorations and body-catching corners the rays can't show. (b) firmware: the
+  ray tracks the floor height along its path and stops at a step up > 24
+  (`s_ray_floor`, far side via `P_PointOnLineSide(trace...)`). Verified: synthetic
+  replay of the log (scratch test, DryJev) old = stuck 40/40 with the same pattern,
+  new = out at step 15; sim regressions (default, barrel, door) pass. **Firmware change
+  not built/flashed yet; agent not yet re-run with real Jev.**
+- **Floors: stairs, lifts, nukage (2026-11-02, firmware + agent):** Jev knew nothing
+  about heights (the agent didn't even pass `z`) and the automap drew EVERY discovered
+  line as `#`, so stairs looked like a stack of walls and nukage pools were invisible
+  (the marine died standing in them). Firmware (`doom_port.c` / `doom_agent.[ch]`):
+  each ray now reports `rise` (highest walkable floor above the player's, > 0 =
+  stairs/ramp up), `hurt` (distance to where a damaging floor begins) / `safe` (on a
+  damaging floor: distance to a safe one), only when present; the obs adds
+  `floor_damage` (sector specials 7=5, 5=10, 4/11/16=20) and `radsuit_tics`; a step
+  > 24 with a lift special (10/21/62/88/120-123) is reported as `door_ahead` with
+  `kind: "lift"`; the automap draws `#` only for lines that block walking, `:` for a
+  walkable step, `~` for the edge of a damaging floor, and no longer draws flat open
+  sector boundaries (an opened door disappears from the map). Agent: sectors get
+  `climb` / `hurt_dist`, `view.ahead_hurt_dist`, `floor` {hurts, radsuit, way_off}
+  while standing on one, `player.radsuit_secs`, `door_ahead.kind`; legend, macro
+  criteria, priority (0) "get off a damaging floor first", supervisor + MCP map
+  legends, DryJev. All new fields are optional: old firmware / the simulator just
+  don't send them. Verified with synthetic obs only; **firmware not built** (no IDF
+  on the machine of that session).
+- **Door: USE pressed out of reach (fixed 2026-11-02, L2 realtime run):** Jev pressed
+  `use` 3 times standing still at 78 units (USE reaches 64); the approach-door net let
+  it through (threshold 80, meant for momentum), the 3 misses marked a normal door
+  `wont_open`, and the marine swung left/right in front of it for 25 decisions (~1
+  min). Now `use_reaches()`: <= 64, or <= 80 only right after a forward move;
+  approach-door and the press counter both use it; criteria say `dist <= 60`.
 - **Game handling** (always on): death → wait 1 s, USE (level restarts); "frozen"
   game (8 steps with no change at all = intermission, or a menu) → USE/wait pulses,
   then "press Esc" hint; WebSocket/Wi-Fi loss → reconnect (10 attempts, backoff);

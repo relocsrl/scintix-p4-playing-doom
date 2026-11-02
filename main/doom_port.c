@@ -609,12 +609,46 @@ static const char *weapon_name(weapontype_t w)
 #define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
 static fixed_t s_ray_hit_frac;
 static boolean s_ray_hit_is_door; /* hit line is a two-sided line currently too closed to pass */
+static boolean s_ray_hit_is_lift; /* ...or a raised lift (step too high, lift special on the line) */
+static fixed_t s_ray_floor;       /* floor height of the sector the ray is currently in */
+static fixed_t s_ray_base;        /* the player's floor height */
+static fixed_t s_ray_rise;        /* highest floor reached above s_ray_base */
+static fixed_t s_ray_hurt_frac;   /* where a damaging floor begins (-1 = not yet) */
+static fixed_t s_ray_safe_frac;   /* where a safe floor begins, for a player on a damaging one */
+static boolean s_ray_start_hurts; /* the player stands on a damaging floor */
+
+/* Damage per hit (every 32 tics) of a sector's floor, as P_PlayerInSpecialSector
+ * applies it: 0 = safe. */
+static int agent_floor_damage(const sector_t *s)
+{
+    switch (s->special) {
+    case 7:  return 5;   /* nukage */
+    case 5:  return 10;  /* hellslime */
+    case 4:              /* strobe + hurt */
+    case 11:             /* E1M8 exit pool */
+    case 16: return 20;  /* super hellslime */
+    default: return 0;
+    }
+}
+
+/* Linedef specials of a lift (lower, wait, raise): a raised lift is a step too
+ * high to climb that USE (or walking over the trigger) brings down. */
+static boolean agent_is_lift_special(short special)
+{
+    switch (special) {
+    case 10: case 21: case 62: case 88: case 120: case 121: case 122: case 123:
+        return true;
+    default:
+        return false;
+    }
+}
 
 static boolean agent_ray_traverse(intercept_t *in)
 {
     line_t *li = in->d.line;
     boolean blocking;
     boolean is_door = false;
+    boolean is_lift = false;
     if (!(li->flags & ML_TWOSIDED) || (li->flags & ML_BLOCKING) ||
         li->frontsector == NULL || li->backsector == NULL) {
         blocking = true; /* one-sided or explicitly blocking = solid wall */
@@ -625,16 +659,48 @@ static boolean agent_ray_traverse(intercept_t *in)
                                  ? li->frontsector->floorheight : li->backsector->floorheight;
         blocking = (opentop - openbottom) < (56 << FRACBITS); /* closed/too low to pass */
         is_door = blocking; /* a two-sided line, passable in principle, currently shut = a door */
+        if (!blocking) {
+            /* The sector on the far side of the line (trace = this ray's divline). A
+             * step up of more than 24 units cannot be walked (P_TryMove), so it is a
+             * wall for the marine even though the opening is tall enough; without
+             * this the ray read "open" across a ledge and the agent pushed into it. */
+            sector_t *farsec = P_PointOnLineSide(trace.x, trace.y, li) ? li->frontsector : li->backsector;
+            if (farsec->floorheight - s_ray_floor > (24 << FRACBITS)) {
+                blocking = true;
+                /* A raised lift: openable like a door (USE brings it down). */
+                is_lift = agent_is_lift_special(li->special);
+                is_door = is_lift;
+            } else {
+                s_ray_floor = farsec->floorheight; /* stepping down is fine; keep tracking */
+                if (s_ray_floor - s_ray_base > s_ray_rise) {
+                    s_ray_rise = s_ray_floor - s_ray_base; /* stairs / ramp going up */
+                }
+                boolean hurts = agent_floor_damage(farsec) > 0;
+                if (!s_ray_start_hurts && hurts && s_ray_hurt_frac < 0) {
+                    s_ray_hurt_frac = in->frac;
+                }
+                if (s_ray_start_hurts && !hurts && s_ray_safe_frac < 0) {
+                    s_ray_safe_frac = in->frac;
+                }
+            }
+        }
     }
     if (blocking) {
         s_ray_hit_frac = in->frac;
         s_ray_hit_is_door = is_door;
+        s_ray_hit_is_lift = is_lift;
         return false; /* stop at the first obstruction */
     }
     return true;
 }
 
-static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door)
+static int agent_frac_dist(fixed_t frac)
+{
+    return (int)(((int64_t)AGENT_RAY_RANGE * frac) >> FRACBITS);
+}
+
+static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door, boolean *is_lift,
+                          doom_agent_ray_t *out)
 {
     /* bearing_deg is signed with positive = RIGHT of centre. Doom angles grow
      * counter-clockwise (left), so a right-of-centre ray is at pm->angle MINUS
@@ -647,14 +713,25 @@ static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door)
     fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
     s_ray_hit_frac = 0;
     s_ray_hit_is_door = false;
+    s_ray_hit_is_lift = false;
+    s_ray_floor = s_ray_base = pm->subsector->sector->floorheight;
+    s_ray_rise = 0;
+    s_ray_hurt_frac = s_ray_safe_frac = -1;
+    s_ray_start_hurts = agent_floor_damage(pm->subsector->sector) > 0;
     P_PathTraverse(pm->x, pm->y, x2, y2, PT_ADDLINES, agent_ray_traverse);
     if (is_door != NULL) {
         *is_door = s_ray_hit_is_door;
     }
-    if (s_ray_hit_frac == 0) {
-        return AGENT_RAY_RANGE; /* clear for at least the scan range */
+    if (is_lift != NULL) {
+        *is_lift = s_ray_hit_is_lift;
     }
-    return (int)(((int64_t)AGENT_RAY_RANGE * s_ray_hit_frac) >> FRACBITS);
+    out->bearing_deg = bearing_deg;
+    out->dist = s_ray_hit_frac == 0 ? AGENT_RAY_RANGE /* clear for at least the scan range */
+                                    : agent_frac_dist(s_ray_hit_frac);
+    out->rise = s_ray_rise >> FRACBITS;
+    out->hurt = s_ray_hurt_frac < 0 ? -1 : agent_frac_dist(s_ray_hurt_frac);
+    out->safe = s_ray_safe_frac < 0 ? -1 : agent_frac_dist(s_ray_safe_frac);
+    return out->dist;
 }
 
 /* Capture what the player can currently SEE into an observation. Runs on the
@@ -686,6 +763,8 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     strlcpy(o->weapon, weapon_name(pl->readyweapon), sizeof(o->weapon));
     o->episode = gameepisode;
     o->map = gamemap;
+    o->floor_damage = agent_floor_damage(pm->subsector->sector);
+    o->radsuit_tics = pl->powers[pw_ironfeet];
 
     int n = 0;
     for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_VISIBLE; th = th->next) {
@@ -742,9 +821,8 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
         int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
         boolean is_door = false;
-        int dist = agent_cast_ray(pm, bearing, &is_door);
-        o->walls[i].bearing_deg = bearing;
-        o->walls[i].dist = dist;
+        boolean is_lift = false;
+        int dist = agent_cast_ray(pm, bearing, &is_door, &is_lift, &o->walls[i]);
         /* Report the closed door/passage in view so the agent can tell a re-shut
          * door (press use again) from a solid wall (go around). A door usually
          * spans several rays; report the most central one so bearing points at the
@@ -756,9 +834,47 @@ static void agent_capture_obs(doom_agent_obs_t *o)
                 o->door_ahead_valid = true;
                 o->door_ahead_bearing = bearing;
                 o->door_ahead_dist = dist;
+                o->door_ahead_lift = is_lift;
             }
         }
     }
+}
+
+/* Map glyph priority when lines share a cell: a wall wins over a hazard edge,
+ * which wins over a walkable step. */
+static int agent_glyph_prio(char ch)
+{
+    switch (ch) {
+    case '#': return 3;
+    case '~': return 2;
+    case ':': return 1;
+    default:  return 0;
+    }
+}
+
+/* How a discovered line reads on the agent's map: '#' = blocks walking (one-sided,
+ * blocking, secret - drawn as a wall on the real automap too -, a closed door, or
+ * a step of more than 24 units), '~' = the edge of a damaging floor, ':' = a
+ * walkable step (stairs), 0 = a flat open sector boundary (not drawn: it is not
+ * an obstacle, and drawing it made stairs and open floors look like walls). */
+static char agent_line_glyph(const line_t *li)
+{
+    if (!(li->flags & ML_TWOSIDED) || (li->flags & (ML_BLOCKING | ML_SECRET)) ||
+        li->frontsector == NULL || li->backsector == NULL) {
+        return '#';
+    }
+    const sector_t *f = li->frontsector, *b = li->backsector;
+    fixed_t opentop = f->ceilingheight < b->ceilingheight ? f->ceilingheight : b->ceilingheight;
+    fixed_t openbottom = f->floorheight > b->floorheight ? f->floorheight : b->floorheight;
+    fixed_t step = f->floorheight > b->floorheight ? f->floorheight - b->floorheight
+                                                   : b->floorheight - f->floorheight;
+    if (opentop - openbottom < (56 << FRACBITS) || step > (24 << FRACBITS)) {
+        return '#';
+    }
+    if ((agent_floor_damage(f) > 0) != (agent_floor_damage(b) > 0)) {
+        return '~';
+    }
+    return step != 0 ? ':' : 0;
 }
 
 /* Bresenham line into the ASCII grid, clipped to bounds. */
@@ -768,7 +884,8 @@ static void agent_plot(doom_agent_map_t *m, int x0, int y0, int x1, int y1, char
     int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
     int err = dx + dy;
     for (;;) {
-        if (x0 >= 0 && x0 < m->cols && y0 >= 0 && y0 < m->rows) {
+        if (x0 >= 0 && x0 < m->cols && y0 >= 0 && y0 < m->rows &&
+            agent_glyph_prio(ch) >= agent_glyph_prio(m->grid[y0][x0])) {
             m->grid[y0][x0] = ch;
         }
         if (x0 == x1 && y0 == y1) {
@@ -840,7 +957,10 @@ static void agent_render_map(doom_agent_map_t *m)
         int r1 = (maxy - (lines[i].v1->y >> FRACBITS)) / upc;
         int c2 = ((lines[i].v2->x >> FRACBITS) - minx) / upc;
         int r2 = (maxy - (lines[i].v2->y >> FRACBITS)) / upc;
-        agent_plot(m, c1, r1, c2, r2, '#');
+        char glyph = agent_line_glyph(&lines[i]);
+        if (glyph) {
+            agent_plot(m, c1, r1, c2, r2, glyph);
+        }
     }
 
     m->player_col = (px - minx) / upc;

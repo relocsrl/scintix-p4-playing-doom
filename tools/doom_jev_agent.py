@@ -159,13 +159,17 @@ MACROS = {
         action={"move": "forward"}, tics=8,
         desc="Walk straight ahead a short distance. Right when `view.ahead_min_dist` "
              "is well above 120 (the path is clear of walls AND barrels) and nothing "
-             "more urgent is in view. Wrong when a barrel sits in your path "
-             "(ahead_min_dist small): sidestep or turn to go around it first."),
+             "more urgent is in view; also up stairs (a sector with `climb`), and to get "
+             "off a damaging floor when `floor.way_off` is ahead. Wrong when a barrel sits "
+             "in your path (ahead_min_dist small): sidestep or turn to go around it first; "
+             "wrong when `view.ahead_hurt_dist` is small and you have no radiation suit "
+             "(you would walk onto nukage/slime)."),
     "forward_long": dict(
         action={"move": "forward"}, tics=16,
         desc="Walk straight ahead a long stretch. Only when `view.ahead_min_dist` is "
-             "large (>= 500), no enemy is close, and the path is a clear corridor "
-             "or open room."),
+             "large (>= 500), no enemy is close, the path is a clear corridor "
+             "or open room, and no damaging floor begins ahead (`view.ahead_hurt_dist` "
+             "absent or beyond 500)."),
     "forward_left": dict(
         action={"move": "forward", "turn": "left"}, tics=8,
         desc="Walk ahead while curving left: follow a passage bending left, or "
@@ -227,9 +231,10 @@ MACROS = {
              "keeping the view straight."),
     "use": dict(
         action={"use": True}, tics=3,
-        desc="Press USE: opens the door in front, flips a switch. USE only "
+        desc="Press USE: opens the door in front, lowers a lift (door_ahead.kind "
+             "`lift`), flips a switch. USE only "
              "reaches about 64 units, so it is right when door_ahead is very "
-             "close (dist < 70) and roughly centred (|bearing| <= 20); if the door "
+             "close (dist <= 60) and roughly centred (|bearing| <= 20); if the door "
              "is farther, walk up to it first. Again when door_ahead is still there "
              "with tics_since_press >= 50 (the press did not take); never while "
              "tics_since_press < 50 (it would send the rising door back down), never "
@@ -314,13 +319,28 @@ STATE_LEGEND = (
     "hitting something - a wall OR a barrel in your path (barrels are not walls, so "
     "a sector can read 'clear' while a barrel blocks you): when it is small, forward "
     "is blocked whatever the sectors say. "
+    "Depths toward a direction you already tried to walk from here and did not move "
+    "(a step too high, a ledge, a pillar or a corner the depth rays cannot show) are "
+    "lowered to ~32: `view.ahead_unwalkable` = straight ahead is such a direction; do "
+    "not walk into it again, turn to another open direction. "
+    "Floors: a sector's `climb` = the floor rises that many units that way = stairs or "
+    "a ramp up, and it IS walkable (just walk forward, the marine climbs steps by "
+    "itself); a step too high to climb is reported as a wall. A sector's `hurt_dist` / "
+    "`view.ahead_hurt_dist` = a damaging floor (nukage, slime, lava) begins that far that "
+    "way: walking onto it costs health every second - do not walk onto it unless it is "
+    "the only way on and player.radsuit_secs is present (radiation suit) or the hurting "
+    "stretch is short and health is high. `floor` (present only while you STAND on a "
+    "damaging floor) = {hurts: damage per second, radsuit, way_off}: get off it NOW by "
+    "the shortest way - turn toward `floor.way_off.bearing` and walk forward; if way_off "
+    "is null no safe floor is in view: turn (big turns, same direction) until it shows. "
+    "Do not stand still, wait or fight from a damaging floor unless radsuit is true. "
     "`view.rays` (present near a door or when you are stuck) is the full depth fan: "
     "51 rays across -45..+45 degrees (~1.8 deg apart), each {b: bearing, d: wall "
     "distance}; use it to line up precisely on a narrow doorway or opening that the 7 "
     "sectors are too coarse to place. "
     "`view.openings` are rays much longer than their neighbours = a passage or "
     "doorway. `door_ahead` is a closed door/passage in view (USE reaches only "
-    "~64 units: walk up to it, press `use` when dist < 70 and roughly centred, "
+    "~64 units: walk up to it, press `use` when dist <= 60 and roughly centred, "
     "then wait; it re-appears if the door re-closed). `door_ahead.presses` / "
     "`tics_since_press` (present once you pressed USE on this door; 35 tics = 1 s): a "
     "door that opens is gone from door_ahead ~28 tics after the press, so with "
@@ -329,7 +349,10 @@ STATE_LEGEND = (
     "tics_since_press >= 50 = the press did not take: press `use` again. "
     "`door_ahead.wont_open` = pressed 3 times and it stayed shut (locked: needs a "
     "key, or not a real door): treat it as a wall, do NOT walk up to it again, "
-    "explore elsewhere. "
+    "explore elsewhere. `door_ahead.kind` = `lift`: a raised lift platform (a ledge "
+    "too high to climb); it works like a door: walk up to it, `use` it when dist <= 60, "
+    "it goes down (gone from door_ahead), then walk forward ONTO it at once and `wait` "
+    "there: it rises back up after ~3 s carrying you to the upper level. "
     "`progress.moved_last_10_steps` = how far you got over the last 10 decisions; "
     "`progress.going_nowhere` = under 48 units: unless you are waiting for a door "
     "you just pressed, you are stuck (dithering, spinning, waiting, or pushing into "
@@ -370,6 +393,10 @@ STATE_LEGEND = (
 )
 
 
+MAP_LEGEND = ("north up, '#' = wall (or closed door / ledge too high), ':' = walkable step "
+              "edge (stairs), '~' = edge of a damaging floor, '@' = you, ' ' = unknown/open")
+
+
 def summarize_walls(walls):
     """Collapse the 51-ray fan into 7 sectors plus notable openings."""
     sectors = []
@@ -380,7 +407,15 @@ def summarize_walls(walls):
             sectors.append({"sector": name, "min_dist": RAY_RANGE, "max_dist": RAY_RANGE})
             continue
         dists = [w["dist"] for w in rays]
-        sectors.append({"sector": name, "min_dist": min(dists), "max_dist": max(dists)})
+        s = {"sector": name, "min_dist": min(dists), "max_dist": max(dists)}
+        # floor facts from the firmware (absent on older firmware / the simulator)
+        climb = max((w.get("rise", 0) for w in rays), default=0)
+        if climb >= FLOOR_CLIMB_MIN:
+            s["climb"] = climb                  # stairs / ramp up that way (walkable)
+        hurt = [w["hurt"] for w in rays if w.get("hurt") is not None and w["hurt"] >= 0]
+        if hurt:
+            s["hurt_dist"] = min(hurt)          # a damaging floor begins this far that way
+        sectors.append(s)
 
     openings = []
     n = len(walls)
@@ -428,7 +463,7 @@ def map_window(map_json, rows=9, cols=25):
 def map_coverage(map_json):
     if not map_json or not map_json.get("valid"):
         return 0
-    return sum(row.count("#") for row in map_json.get("grid", []))
+    return sum(row.count("#") + row.count(":") + row.count("~") for row in map_json.get("grid", []))
 
 
 def heading_error(current, target):
@@ -479,6 +514,48 @@ class Memory:
         # left-right forever; this lets it remember "heading 60 was open for 700 units".
         self.pano = {}            # compass bin -> nearest depth seen there (wall or barrel)
         self.pano_anchor = None   # (x, y) the panorama was taken from
+        # Walk blocks: compass headings where a straight forward move came back `blocked`
+        # although the depth fan looked open (a step too high, a ledge, a solid
+        # decoration, a corner caught by the marine's 32-unit body - none of which the
+        # wall rays show). Without this the view kept saying "465 units open" in that
+        # direction, best_seen / way_out pointed right back at it, and Jev walked into
+        # the same invisible obstacle forever (turn away, turn back, forward, BLOCKED).
+        self.walk_blocks = []     # {"x","y","heading","level","step"}
+
+    def note_walk_block(self, macro, obs):
+        """Remember the heading of a forward move that went nowhere."""
+        if not obs.get("valid") or not obs.get("blocked") or macro not in FORWARD_MOVES:
+            return
+        for e in hostiles(obs.get("visible", [])):    # a monster in the way is not terrain
+            if abs(e["bearing"]) <= 25 and e["dist"] <= 200:
+                return
+        lvl = (obs.get("episode"), obs.get("map"))
+        self.walk_blocks = [b for b in self.walk_blocks
+                            if not (b["level"] == lvl and abs(heading_error(b["heading"], obs["angle"])) < 3
+                                    and math.hypot(b["x"] - obs["x"], b["y"] - obs["y"]) < 16)]
+        self.walk_blocks.append({"x": obs["x"], "y": obs["y"], "heading": obs["angle"],
+                                 "level": lvl, "step": self.steps})
+        del self.walk_blocks[:-WALK_BLOCK_KEEP]
+
+    def mask_walk_blocks(self, obs):
+        """Lower the ray depths toward headings already found unwalkable from about
+        here, in place, so the view, sectors, openings, way_out and the panorama all
+        agree with what walking there actually did. Sets obs['walk_blocked_ahead']."""
+        obs["walk_blocked_ahead"] = False
+        if not obs.get("valid") or not obs.get("walls") or not self.walk_blocks:
+            return
+        lvl = (obs.get("episode"), obs.get("map"))
+        self.walk_blocks = [b for b in self.walk_blocks if self.steps - b["step"] <= WALK_BLOCK_STEPS]
+        near = [b for b in self.walk_blocks
+                if b["level"] == lvl and math.hypot(b["x"] - obs["x"], b["y"] - obs["y"]) <= WALK_BLOCK_RADIUS]
+        if not near:
+            return
+        for w in obs["walls"]:
+            h = obs["angle"] + w["bearing"]
+            if any(abs(heading_error(b["heading"], h)) <= WALK_BLOCK_HALF for b in near):
+                w["dist"] = min(w["dist"], WALK_BLOCK_DIST)
+                if abs(w["bearing"]) <= 6:
+                    obs["walk_blocked_ahead"] = True
 
     def note_view(self, obs):
         """Fold this frame's depth fan into the panorama (reset after moving away)."""
@@ -521,6 +598,8 @@ class Memory:
         else:
             self.same_streak = 1
         self.recent.append(macro)
+        self.note_walk_block(macro, obs)
+        self.mask_walk_blocks(obs)
         self.note_view(obs)
         if obs.get("valid"):
             now = time.time()
@@ -657,7 +736,10 @@ def build_questions(intent):
             "type": "choice",
             "instructions": (
                 "You are the reflexes of the DOOM marine. Pick the ONE macro to run for "
-                "the next ~0.3 s given the state. Priorities: (1) do not repeat a macro "
+                "the next ~0.3 s given the state. Priorities: (0) if `floor` is present "
+                "(you stand on a damaging floor) and floor.radsuit is false, getting off it "
+                "comes first: turn toward floor.way_off and walk forward, shooting only "
+                "what is already in your sights; (1) do not repeat a macro "
                 "that was just `blocked_last_move` — change direction instead; "
                 "(2) if `aim.on_target`, do NOT turn: `wait` (hold heading) and let "
                 "FIRE do the work - turning here overshoots (lag). If an enemy is in "
@@ -667,7 +749,7 @@ def build_questions(intent):
                 "enemies: never turn to centre one, and if one is right ahead, sidestep "
                 "or turn to go around it; (3) if door_ahead is present and not "
                 "`wont_open` (a wont_open door is a wall: turn away from it), walk up to "
-                "it (forward / small turns to centre it) until dist < 70, then `use`; "
+                "it (forward / small turns to centre it) until dist <= 60, then `use`; "
                 "while door_ahead.tics_since_press < 50 `wait` facing it; if it is still "
                 "there at tics_since_press >= 50, `use` again; once door_ahead is gone the "
                 "door is open: walk through it (`forward`); (4) if progress.going_nowhere "
@@ -778,7 +860,19 @@ class DryJev:
         if centred and state["player"]["ammo"] != 0:
             fire = 0.9
         targets = [e for e in enemies if e["name"] != "barrel"]
-        if targets:
+        fl = state.get("floor")
+        if fl and not fl.get("radsuit"):
+            # standing on nukage/slime: getting off it beats everything else
+            wo = fl.get("way_off")
+            if wo is None:
+                choice = "turn_right"            # no safe floor in view: keep looking, one way
+            elif abs(wo["bearing"]) <= 10:
+                choice = "forward"
+            elif abs(wo["bearing"]) <= 25:
+                choice = "forward_left" if wo["bearing"] < 0 else "forward_right"
+            else:
+                choice = "turn_left" if wo["bearing"] < 0 else "turn_right"
+        elif targets:
             e = min(targets, key=lambda e: e["dist"])
             if abs(e["bearing"]) > 18:
                 choice = "turn_left" if e["bearing"] < 0 else "turn_right"
@@ -790,9 +884,9 @@ class DryJev:
                 choice = "wait"          # centred and in range: hold and fire (a turn overshoots)
             else:
                 choice = "forward"       # centred but far: close in, firing while advancing
-        elif door and abs(door["bearing"]) <= 25 and (door["dist"] < 70 or n_blocked < 2):
+        elif door and abs(door["bearing"]) <= 25 and (door["dist"] <= 60 or n_blocked < 2):
             # (a far door behind something that keeps blocking us: the rules below)
-            if door["dist"] < 70:
+            if door["dist"] <= 60:
                 rising = door.get("presses") and door.get("tics_since_press", 0) < 50
                 choice = "wait" if rising or (recent and recent[-1] == "use") else "use"
             elif abs(door["bearing"]) > 8 and door["dist"] < 300:
@@ -891,6 +985,43 @@ PANO_BIN = 10
 PANO_RESET_DIST = 64
 TARGET_OPEN = 160
 
+# Walk blocks (Memory.note_walk_block): a forward move that came back `blocked` marks
+# its heading unwalkable within WALK_BLOCK_RADIUS units of that spot (+/-WALK_BLOCK_HALF
+# deg, depth lowered to WALK_BLOCK_DIST) for WALK_BLOCK_STEPS decisions.
+WALK_BLOCK_RADIUS = 48
+WALK_BLOCK_HALF = 12
+WALK_BLOCK_DIST = 32
+WALK_BLOCK_STEPS = 150
+WALK_BLOCK_KEEP = 24
+
+# Floor facts (firmware rays' rise / hurt / safe, obs floor_damage / radsuit_tics):
+# a rise below FLOOR_CLIMB_MIN is noise (a lip, a raised floor patch), not stairs.
+FLOOR_CLIMB_MIN = 16
+
+
+def floor_of(obs):
+    """`floor` block for the state: present only when the marine stands on a damaging
+    floor. `way_off` = nearest safe floor in view (None = none in view: turn to look),
+    using the rays' `safe` distance."""
+    dmg = obs.get("floor_damage", 0) or 0
+    if dmg <= 0:
+        return None
+    suit = (obs.get("radsuit_tics", 0) or 0) > 0
+    exits = [w for w in obs.get("walls", []) if w.get("safe") is not None and w["safe"] >= 0]
+    way_off = None
+    if exits:
+        w = min(exits, key=lambda w: (w["safe"], abs(w["bearing"])))
+        side = "ahead" if abs(w["bearing"]) <= 10 else ("left" if w["bearing"] < 0 else "right")
+        way_off = {"bearing": round(w["bearing"]), "dist": round(w["safe"]), "side": side}
+    return {"hurts": dmg, "radsuit": suit, "way_off": way_off}
+
+
+def hurt_ahead(obs, bearing=6):
+    """Distance straight ahead to where a damaging floor begins (None = none)."""
+    d = [w["hurt"] for w in obs.get("walls", [])
+         if abs(w["bearing"]) <= bearing and w.get("hurt") is not None and w["hurt"] >= 0]
+    return min(d) if d else None
+
 # Aiming: a hitscan shot lands anywhere within this bearing cone, and at ~700 ms Jev
 # latency a turn to "centre better" acts on a stale bearing and overshoots. So once the
 # enemy is centred AND close enough to be worth engaging, hold and fire instead of
@@ -927,11 +1058,26 @@ def is_dead_door(obs, mem):
                for d in mem.dead_doors)
 
 
+def use_reaches(door, mem):
+    """Would a USE pressed now reach this door? USE reaches DOOR_REACH units. Up to
+    DOOR_PRESS_DIST only if the marine is walking toward it (the momentum of the last
+    forward move carries it into reach during the press); standing still at 78 units
+    the press hits nothing - on the board that made 3 out-of-reach presses mark a
+    normal door `wont_open`, and the marine then swung left/right in front of it for
+    25 decisions."""
+    if not door:
+        return False
+    if door["dist"] <= DOOR_REACH:
+        return True
+    walking = bool(mem.recent) and mem.recent[-1] in WALK_TOWARD and mem.consecutive_blocked == 0
+    return walking and door["dist"] <= DOOR_PRESS_DIST
+
+
 def note_door_attempt(obs, mem):
     """A USE was just pressed: if it was aimed at door_ahead from within reach, count it
     against that door (to press again, or give up, if the door stays shut)."""
     door = obs.get("door_ahead")
-    if not (door and door["dist"] <= DOOR_PRESS_DIST and abs(door["bearing"]) <= 25):
+    if not (use_reaches(door, mem) and abs(door["bearing"]) <= 25):
         return
     p = door_world_pos(obs)
     if p is None:
@@ -1015,10 +1161,20 @@ def view_of(obs, sectors, openings, ahead, mem, rays_mode):
     time, differing mainly there), so with rays_mode 'auto' it is added only near a door
     or when stuck; 'always' / 'never' force it."""
     view = {"ahead_min_dist": ahead, "sectors": sectors, "openings": openings}
+    if obs.get("walk_blocked_ahead"):
+        view["ahead_unwalkable"] = True
+    h = hurt_ahead(obs)
+    if h is not None:
+        view["ahead_hurt_dist"] = h
     detailed = rays_mode == "always" or (rays_mode == "auto" and (
         obs.get("door_ahead") or obs.get("blocked") or mem.stalled(PROGRESS_STEPS, GOING_NOWHERE)))
     if detailed:
-        view["rays"] = [{"b": w["bearing"], "d": w["dist"]} for w in obs.get("walls", [])]
+        view["rays"] = []
+        for w in obs.get("walls", []):
+            r = {"b": w["bearing"], "d": w["dist"]}
+            if w.get("hurt") is not None and w["hurt"] >= 0:
+                r["hurt"] = w["hurt"]
+            view["rays"].append(r)
     return view
 
 
@@ -1040,6 +1196,7 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
             door["tics_since_press"] = mem.game_tics - w["tic"]
         if is_dead_door(obs, mem):
             door["wont_open"] = True
+        door.setdefault("kind", "door")
     moved = mem.net_displacement(PROGRESS_STEPS)
     going_nowhere = moved is not None and moved < GOING_NOWHERE
     dithering = is_oscillating(mem.recent) or (going_nowhere and is_sweeping(mem.recent))
@@ -1078,9 +1235,14 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
     }
     if best:
         state["best_seen"] = best
+    fl = floor_of(obs)
+    if fl:
+        state["floor"] = fl
+    if (obs.get("radsuit_tics", 0) or 0) > 0:
+        state["player"]["radsuit_secs"] = round(obs["radsuit_tics"] / TICRATE)
     if map_win:
         state["automap_window"] = {
-            "legend": "north up, '#' = discovered wall, '@' = you, ' ' = unknown/empty",
+            "legend": MAP_LEGEND,
             "rows": map_win,
         }
     return state
@@ -1134,6 +1296,9 @@ SIDE_OF = {**{m: "L" for m in TURN_MACROS_LEFT}, **{m: "R" for m in TURN_MACROS_
            "strafe_left": "sL", "strafe_right": "sR", "forward": "F", "back": "B"}
 MOVE_MACROS = {m for m, d in MACROS.items() if d["action"].get("move") or d["action"].get("strafe")}
 STRAIGHT_MOVES = {m for m in MOVE_MACROS if not MACROS[m]["action"].get("turn")}
+FORWARD_MOVES = {m for m in STRAIGHT_MOVES if MACROS[m]["action"].get("move") == "forward"
+                 and not MACROS[m]["action"].get("strafe")}
+WALK_TOWARD = {m for m in MOVE_MACROS if MACROS[m]["action"].get("move") == "forward"}
 
 
 def is_oscillating(recent, n=4):
@@ -1243,6 +1408,10 @@ SUPERVISOR_SYSTEM = (
     "through first (e.g. the gap in a wall line on the map), or null while it is stuck "
     "so it can get free locally. Barrels are hazards, not targets: never tell the "
     "reflexes to shoot barrels or walk into them, only to go around them. "
+    "Map glyphs: '#' = wall (also a closed door or a ledge too high to climb), ':' = a "
+    "step edge the marine CAN walk over (rows of ':' = stairs: a way up, not a wall), "
+    "'~' = the edge of a damaging floor (nukage/slime pool: avoid crossing it without a "
+    "radiation suit), '@' = the marine, ' ' = unexplored or open floor. "
     "Respond with ONLY a JSON object, no prose, with keys: "
     "goal (string, <= 160 chars, imperative, what the reflexes should do now, e.g. "
     "'Head east along the corridor, open the door at its end, then clear the room'), "
@@ -2056,7 +2225,8 @@ def run(args):
                         flags.append("dead-door")
                     # - USE only reaches 64 units: a `use` on a far door becomes a step toward it
                     door = obs.get("door_ahead")
-                    if mech and macro == "use" and door and door["dist"] > 80 and not is_dead_door(obs, mem):
+                    if mech and macro == "use" and door and not use_reaches(door, mem) and \
+                            not is_dead_door(obs, mem):
                         macro = "forward" if abs(door["bearing"]) <= 12 else \
                             ("forward_left" if door["bearing"] < 0 else "forward_right")
                         mem.heuristic_overrides += 1
