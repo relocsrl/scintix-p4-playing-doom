@@ -160,6 +160,40 @@ configurations:
   auto`, default; `always`/`never` to force). The doorway benefit is taken where it
   matters without paying +23% in empty corridors. DryJev / regressions unaffected
   (they read `view.sectors`, always present).
+- **Left/right sweep in place (fixed 2026-11-02, L1 and L2 on the board):** the marine
+  stood still for 80+ decisions (`mv 0`) turning RRR LLLL RRR... Causes: (a) the view
+  is only +/-45 and Jev has no memory, so after each turn it forgot the open direction
+  it had just seen and turned back to "look again"; (b) `dithering` only caught strict
+  L/R/L/R alternation, not runs; (c) in L2 the commander's `target_heading` (0 = north)
+  pointed into the wall right in front, so `turn_hint` kept pulling it back to the
+  wall, then going_nowhere turned it away, and so on; (d) the supervisor returned
+  empty text (`max_tokens` 400 used up by the model's default adaptive thinking) so the
+  stale heading was never replaced. Fixes, all as facts in the state (no new override):
+  `Memory.note_view` keeps a **panorama** (depth per 10-deg compass bin, reset after
+  moving 64 units) and the state gets `best_seen` {heading, dist, bearing, side} when
+  stuck; `dithering` also = turns-only in both directions while going_nowhere
+  (`is_sweeping`); `commander.turn_hint` becomes `blocked` when the panorama shows a wall
+  on the target heading (`target_heading_open_dist` < 160) and `paused` while stuck;
+  instructions/criteria updated (keep turning the same way to best_seen, open path beats
+  turn_hint); DryJev uses best_seen. Supervisor: `max_tokens` 4000 + effort `low`, clear
+  error with `stop_reason` on an empty reply, system prompt says headings are not paths
+  and barrels are never targets. Verified: replay of the log's sweep (synthetic room)
+  -> `dithering` true, `turn_hint` blocked, DryJev out in 4 steps; sim regressions
+  (default identical to before, barrel, door) pass. **Not verified with real Jev.**
+- **Realtime: every decision one macro late (fixed 2026-11-02, L1 `--realtime` run):**
+  stuck ~110 decisions in a small room doing forward / L L / forward / R R. In
+  realtime the board answers one frame after the new keys go down, so the obs the
+  next decision was made from predated the macro just sent: after a turn_left the
+  next state still showed the old heading (35% of 572 turns in that run), Jev turned
+  again (60 deg instead of 30), and the following `forward` ran while the second turn
+  was still swinging it, into the wall (`BLOCKED` with ah ~290). `best_seen` was right
+  (heading ~290, 440 open) and Jev did pick forward there; the lag threw it off. Fix:
+  after sending a macro, wait until its hold expires, then take a fresh frame with an
+  empty `{"hold": true, "tics": 1}` (stays realtime; its `blocked` refers to the macro).
+  Halves the decision rate on the board (~1.7/s instead of ~3.5/s at ~280 ms Jev
+  latency) but each decision sees the result of the previous one. `--rt-pipelined`
+  restores the old behaviour. Sim (DryJev): stale-after-turn 50% -> 0%; lockstep
+  unchanged. **Not yet re-run on the board.**
 - **Game handling** (always on): death → wait 1 s, USE (level restarts); "frozen"
   game (8 steps with no change at all = intermission, or a menu) → USE/wait pulses,
   then "press Esc" hint; WebSocket/Wi-Fi loss → reconnect (10 attempts, backoff);

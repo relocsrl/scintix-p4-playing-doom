@@ -179,15 +179,19 @@ MACROS = {
     "turn_left": dict(
         action={"turn": "left"}, tics=turn_tics(30),
         desc="Turn left in place about 30 degrees, no movement. Use to face an "
-             "enemy or an opening on the left (bearing < -15), to follow a "
-             "commander turn_hint of `left`, or to look for a way out when ahead "
-             "is blocked (or progress.going_nowhere) and the left side has more room."),
+             "enemy or an opening on the left (bearing < -15), to turn toward "
+             "best_seen when its bearing < -15, to follow a commander turn_hint of "
+             "`left` when ahead is not an open path, or to look for a way out when ahead "
+             "is blocked (or progress.going_nowhere) and the left side has more room. "
+             "Wrong right after turning right while standing still (that is the sweep loop)."),
     "turn_right": dict(
         action={"turn": "right"}, tics=turn_tics(30),
         desc="Turn right in place about 30 degrees, no movement. Use to face an "
-             "enemy or an opening on the right (bearing > 15), to follow a "
-             "commander turn_hint of `right`, or to look for a way out when ahead "
-             "is blocked (or progress.going_nowhere) and the right side has more room."),
+             "enemy or an opening on the right (bearing > 15), to turn toward "
+             "best_seen when its bearing > 15, to follow a commander turn_hint of "
+             "`right` when ahead is not an open path, or to look for a way out when ahead "
+             "is blocked (or progress.going_nowhere) and the right side has more room. "
+             "Wrong right after turning left while standing still (that is the sweep loop)."),
     "turn_left_small": dict(
         action={"turn": "left"}, tics=turn_tics(9),
         desc="Small left adjustment (~9 degrees): centre a door, or an enemy that is "
@@ -348,9 +352,21 @@ STATE_LEGEND = (
     "view is a near wall). Never `turn_around` twice in a row: if you just did "
     "(recent_actions ends in turn_around) and you are still boxed in, pick "
     "`way_out.side` instead - a second turn_around only spins you back where you were. "
+    "`best_seen` (present when you are stuck and have already looked around from this "
+    "spot) is the most open direction you SAW in the last turns, including directions "
+    "now behind you {heading, dist, bearing from where you face now, side}: the view "
+    "only spans +/-45, so turning back and forth to 'look again' just re-discovers it. "
+    "Turn toward best_seen.bearing (big turns until |bearing| <= 15) and then go "
+    "`forward`; once it is ahead (|bearing| <= 10) and ahead_min_dist is clear, walk, "
+    "do not turn away again. "
     "`heading` is a compass heading, 0 = north, 90 = east. "
     "`commander` (when present) is the strategic layer's current intent: "
-    "`turn_hint` says which way to turn to get on the requested heading."
+    "`turn_hint` says which way to turn to get on the requested heading. It is a "
+    "direction to drift toward, not a path: never turn from an open path into a near "
+    "wall because of it. `turn_hint` = `blocked` means you have looked that way from "
+    "here and it is a wall (`target_heading_open_dist`): detour through an opening or "
+    "best_seen instead; `paused` = you are stuck, get unstuck first and ignore the "
+    "heading for now."
 )
 
 
@@ -457,6 +473,46 @@ class Memory:
         self.last_stall_step = -1000    # step of the last stall-net override (cooldown)
         self.door_work = None     # the door last pressed with USE in reach: {"x","y","level","tries","tic"}
         self.dead_doors = []      # doors still shut after DOOR_MAX_TRIES presses: {"x","y","tic","level"}
+        # Panorama: depth seen in each compass direction from (about) the current spot,
+        # across steps. The view is only +/-45 deg, so a marine turning in place to look
+        # for a way out forgets what was behind it after every turn and sweeps
+        # left-right forever; this lets it remember "heading 60 was open for 700 units".
+        self.pano = {}            # compass bin -> nearest depth seen there (wall or barrel)
+        self.pano_anchor = None   # (x, y) the panorama was taken from
+
+    def note_view(self, obs):
+        """Fold this frame's depth fan into the panorama (reset after moving away)."""
+        if not obs.get("valid") or not obs.get("walls"):
+            return
+        x, y = obs["x"], obs["y"]
+        if self.pano_anchor is None or math.hypot(x - self.pano_anchor[0], y - self.pano_anchor[1]) > PANO_RESET_DIST:
+            self.pano = {}
+            self.pano_anchor = (x, y)
+        frame = {}
+        for w in obs["walls"]:
+            b = int(((obs["angle"] + w["bearing"]) % 360) // PANO_BIN)
+            frame[b] = min(frame.get(b, RAY_RANGE), w["dist"])
+        for t in obs.get("visible", []):      # a barrel blocks its direction too
+            if t["name"] in NON_HOSTILE:
+                b = int(((obs["angle"] + t["bearing"]) % 360) // PANO_BIN)
+                if b in frame:
+                    frame[b] = min(frame[b], t["dist"])
+        self.pano.update(frame)               # latest look wins per direction
+
+    def pano_depth(self, heading):
+        return self.pano.get(int((heading % 360) // PANO_BIN))
+
+    def best_seen(self, obs):
+        """The most open direction already looked at from here, relative to now; None
+        until the panorama covers more than the current view."""
+        if len(self.pano) * PANO_BIN <= 100:
+            return None
+        b, d = max(self.pano.items(), key=lambda kv: kv[1])
+        heading = b * PANO_BIN + PANO_BIN / 2
+        rel = round(heading_error(obs["angle"], heading))
+        side = "ahead" if abs(rel) <= 10 else ("left" if rel < 0 else "right")
+        return {"heading": round(heading), "dist": d, "bearing": rel, "side": side,
+                "looked_around_deg": len(self.pano) * PANO_BIN}
 
     def note_step(self, macro, obs, latency, usage):
         self.steps += 1
@@ -465,6 +521,7 @@ class Memory:
         else:
             self.same_streak = 1
         self.recent.append(macro)
+        self.note_view(obs)
         if obs.get("valid"):
             now = time.time()
             self.positions.append((now, obs["x"], obs["y"], obs["health"]))
@@ -541,13 +598,25 @@ class Intent:
         self.source = source
         self.created = time.time()
 
-    def to_state(self, heading):
+    def to_state(self, heading, stuck=False, target_depth=None):
+        """`target_depth`: how far the marine has seen it can walk on the target heading
+        from here (None = not looked that way yet). A heading is a compass direction, not
+        a path: from inside a room it often points straight into a wall. Then (and while
+        stuck) the hint must not keep pulling the marine back to face that wall - that
+        is the turn-to-wall / turn-to-open / turn-to-wall sweep."""
         d = {"goal": self.goal, "fire_policy": self.fire_policy}
         if self.target_heading is not None and heading is not None:
             err = heading_error(heading, self.target_heading)
             d["target_heading"] = self.target_heading
             d["heading_error_deg"] = err
-            d["turn_hint"] = "on_course" if abs(err) <= 12 else ("right" if err > 0 else "left")
+            if target_depth is not None:
+                d["target_heading_open_dist"] = target_depth
+            if target_depth is not None and target_depth < TARGET_OPEN:
+                d["turn_hint"] = "blocked"      # wall that way: detour through an opening
+            elif stuck:
+                d["turn_hint"] = "paused"       # get unstuck first (best_seen / way_out)
+            else:
+                d["turn_hint"] = "on_course" if abs(err) <= 12 else ("right" if err > 0 else "left")
         if self.note:
             d["note"] = self.note
         return d
@@ -603,11 +672,15 @@ def build_questions(intent):
                 "there at tics_since_press >= 50, `use` again; once door_ahead is gone the "
                 "door is open: walk through it (`forward`); (4) if progress.going_nowhere "
                 "or dithering, and no enemy in view and no door rising: do something "
-                "different - turn toward the longest open sector or the best `opening`, "
-                "then go forward; (5) otherwise make progress toward the "
-                "commander goal / turn_hint if present, else toward the longest open "
-                "sector or the best `opening`; (6) prefer forward motion when `ahead` "
-                "is clear. Avoid oscillating left/right (see recent_actions)."),
+                "different - turn toward `best_seen` if present (else the longest open "
+                "sector or the best `opening`) and then go forward; keep turning the SAME "
+                "way until it is ahead, never reverse mid-turn; (5) otherwise make "
+                "progress toward the commander goal / turn_hint (only `left` / `right`; "
+                "ignore `blocked` / `paused`), else toward the longest open sector or "
+                "the best `opening`; (6) prefer forward motion when `ahead_min_dist` is "
+                "clear (>= 300): walking an open path beats turning toward a heading. "
+                "Avoid oscillating left/right (see recent_actions): a run of turns one "
+                "way followed by a run the other way, standing still, is the loop to avoid."),
             "criteria": {name: m["desc"] for name, m in MACROS.items()},
         },
         "fire": {
@@ -726,13 +799,23 @@ class DryJev:
                 choice = "turn_left_small" if door["bearing"] < 0 else "turn_right_small"
             else:
                 choice = "forward"
-        elif state.get("progress", {}).get("going_nowhere") or n_blocked >= 2:
-            # stuck: head for the most open direction (way_out). turn_around only for a
-            # real dead end, and never twice in a row (that just spins back).
-            wo = state.get("way_out") or {}
+        elif state.get("progress", {}).get("going_nowhere") or state.get("dithering") or n_blocked >= 2:
+            # stuck: head for the most open direction already seen from here (best_seen,
+            # may be behind us), else the most open one in view (way_out). turn_around
+            # only for a real dead end, and never twice in a row (that just spins back).
+            wo = state.get("best_seen") or state.get("way_out") or {}
             b = wo.get("bearing", 0)
             just_turned = recent and recent[-1] == "turn_around"
-            if wo.get("dead_end") and not just_turned:
+            if "looked_around_deg" in wo and wo.get("dist", 0) >= 200:
+                if abs(b) <= 10 and ahead >= 120 and not blocked:
+                    choice = "forward"
+                elif abs(b) <= 18:
+                    choice = "turn_left_small" if b < 0 else "turn_right_small"
+                elif abs(b) >= 150 and not just_turned:
+                    choice = "turn_around"
+                else:
+                    choice = "turn_left" if b < 0 else "turn_right"
+            elif wo.get("dead_end") and not just_turned:
                 choice = "turn_around"
             elif wo.get("side") == "ahead" and ahead >= 120 and not blocked:
                 choice = "forward"
@@ -800,6 +883,13 @@ DEAD_DOOR_TICS = 120 * TICRATE   # then it gets another chance
 # pushing in place - turning in place is never `blocked`).
 PROGRESS_STEPS = 10
 GOING_NOWHERE = 48
+
+# Panorama (Memory.note_view): compass bins of PANO_BIN deg, forgotten after moving
+# PANO_RESET_DIST units. A direction counts as walkable toward the commander's heading
+# only if it is open at least TARGET_OPEN units.
+PANO_BIN = 10
+PANO_RESET_DIST = 64
+TARGET_OPEN = 160
 
 # Aiming: a hitscan shot lands anywhere within this bearing cone, and at ~700 ms Jev
 # latency a turn to "centre better" acts on a stale bearing and overshoots. So once the
@@ -951,6 +1041,11 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
         if is_dead_door(obs, mem):
             door["wont_open"] = True
     moved = mem.net_displacement(PROGRESS_STEPS)
+    going_nowhere = moved is not None and moved < GOING_NOWHERE
+    dithering = is_oscillating(mem.recent) or (going_nowhere and is_sweeping(mem.recent))
+    stuck = going_nowhere or dithering or mem.consecutive_blocked >= 2
+    best = mem.best_seen(obs) if stuck else None
+    target_depth = mem.pano_depth(intent.target_heading) if intent.target_heading is not None else None
     aim = None
     if enemies:
         tgt = min(enemies, key=lambda e: abs(e["bearing"]))
@@ -975,12 +1070,14 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
         "consecutive_blocked": mem.consecutive_blocked,
         "recent_actions": list(mem.recent),
         "same_action_streak": mem.same_streak,
-        "dithering": is_oscillating(mem.recent),
+        "dithering": dithering,
         "progress": {"moved_last_10_steps": None if moved is None else round(moved),
-                     "going_nowhere": moved is not None and moved < GOING_NOWHERE},
+                     "going_nowhere": going_nowhere},
         "steps": mem.steps,
-        "commander": intent.to_state(obs["angle"]),
+        "commander": intent.to_state(obs["angle"], stuck=stuck, target_depth=target_depth),
     }
+    if best:
+        state["best_seen"] = best
     if map_win:
         state["automap_window"] = {
             "legend": "north up, '#' = discovered wall, '@' = you, ' ' = unknown/empty",
@@ -1049,6 +1146,20 @@ def is_oscillating(recent, n=4):
         return False
     sides = [SIDE_OF[m] for m in last]
     return all(OPPOSITES[a] == b for a, b in zip(last, sides[1:]))
+
+
+TURN_IN_PLACE = {"turn_left": "L", "turn_left_small": "L", "turn_right": "R",
+                 "turn_right_small": "R", "turn_around": "R"}
+
+
+def is_sweeping(recent, n=6):
+    """True when the last n macros are all turns in place, in both directions: the
+    marine is sweeping its view left and right (RRR LLLL RRR...) without going anywhere.
+    is_oscillating only sees strict L/R/L/R alternation and misses this."""
+    last = list(recent)[-n:]
+    if len(last) < n or any(m not in TURN_IN_PLACE for m in last):
+        return False
+    return len({TURN_IN_PLACE[m] for m in last}) == 2
 
 
 def break_oscillation(obs, mem):
@@ -1127,6 +1238,11 @@ SUPERVISOR_SYSTEM = (
     "discovered, the recent trajectory and statistics. Your job is to set a compact "
     "INTENT that the reflex layer reads at every step. Be decisive and concrete. "
     "Compass headings: 0 = north (up on the map), 90 = east, 180 = south, 270 = west. "
+    "target_heading is a straight compass direction, not a path: if the marine is "
+    "against a wall that way, pick the heading of the opening/doorway it must go "
+    "through first (e.g. the gap in a wall line on the map), or null while it is stuck "
+    "so it can get free locally. Barrels are hazards, not targets: never tell the "
+    "reflexes to shoot barrels or walk into them, only to go around them. "
     "Respond with ONLY a JSON object, no prose, with keys: "
     "goal (string, <= 160 chars, imperative, what the reflexes should do now, e.g. "
     "'Head east along the corridor, open the door at its end, then clear the room'), "
@@ -1288,9 +1404,14 @@ class Supervisor(threading.Thread):
     def call_anthropic(self, prompt):
         if not self.api_key:
             raise RuntimeError("no ANTHROPIC_API_KEY (or --supervisor-key)")
+        # Current Claude models think (adaptive) by default, and the thinking counts
+        # against max_tokens: with the old 400 the budget ran out before any text and the
+        # reply came back empty ("supervisor returned no JSON: ''"). Room to think + low
+        # effort (a short JSON reply does not need deep reasoning; keeps latency down).
         body = {
             "model": self.model,
-            "max_tokens": 400,
+            "max_tokens": 4000,
+            "output_config": {"effort": "low"},
             "system": SUPERVISOR_SYSTEM,
             "messages": [{"role": "user", "content": prompt}],
         }
@@ -1300,7 +1421,10 @@ class Supervisor(threading.Thread):
                      "content-type": "application/json"})
         data = http_json(req, timeout=60)
         parts = data.get("content", [])
-        return "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+        text = "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+        if not text.strip():
+            raise RuntimeError(f"supervisor reply had no text (stop_reason={data.get('stop_reason')})")
+        return text
 
     def call_openai(self, prompt):
         if not self.api_key:
@@ -1955,8 +2079,23 @@ def run(args):
                 action = macro_to_action(macro, fire, args.speed, weapon, catchup, args.realtime)
 
                 # ---- act -----------------------------------------------------------
+                t_sent = time.perf_counter()
                 new_obs, dev_latency = link.step(action)
                 last_reply_t = time.perf_counter()
+                if args.realtime and not args.rt_pipelined and new_obs.get("valid"):
+                    # In realtime the reply comes one frame after the new keys went down,
+                    # i.e. BEFORE the macro has done anything. Deciding the next step from
+                    # it means Jev always sees the world one macro late: after a 30-deg
+                    # turn it still sees the old heading, turns again (60 deg), then walks
+                    # off at the wrong angle - the double turns / L-L-R-R swing seen on the
+                    # board. So let the macro play out (its hold expires on the board) and
+                    # take a fresh frame with an empty hold: still realtime, and its
+                    # `blocked` refers to the macro that just ran.
+                    remain = action["tics"] / TICRATE - (time.perf_counter() - t_sent)
+                    if remain > 0:
+                        time.sleep(remain + 1.0 / TICRATE)
+                    new_obs, _ = link.step({"hold": True, "tics": 1})
+                    last_reply_t = time.perf_counter()
                 if not new_obs.get("valid"):
                     say("player gone (menu / title screen?). Waiting for a live player...")
                     obs = wait_for_level(link, args.quiet)
@@ -2120,6 +2259,10 @@ def main():
     p.add_argument("--realtime", action="store_true",
                    help="firmware free-running mode (needs the `hold` patch on the device / the simulator): the game "
                         "never pauses, each decision replaces the held keys and is answered at once; play speed = 100%%")
+    p.add_argument("--rt-pipelined", action="store_true",
+                   help="realtime only: decide from the frame returned right after sending the keys (the pre-2026-11 "
+                        "behaviour: faster, but every decision sees the world one macro late, so turns double up). "
+                        "Default: let each macro play out and decide from a fresh frame")
     p.add_argument("--speed", type=float, default=1.0, help="multiplier on each macro's tics (1.0 = defaults)")
     p.add_argument("--catchup", type=int, default=-1,
                    help="lockstep only: game tics the board catches up with the new keys after our thinking pause, "
