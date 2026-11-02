@@ -8,7 +8,7 @@ User-facing docs are in [`tools/README.md`](../tools/README.md) §3–4.
 
 Let **Jev** (TypeSafe AI's "System One" model, released 2026-09-16: typed,
 calibrated decisions in ~100–300 ms instead of prose) play DOOM on the SCINTIX P4
-through the firmware's `/agent` WebSocket (branch `ai-agent-api`), in two
+through the firmware's `/agent` WebSocket (on `master` since v0.5.0), in two
 configurations:
 
 - **Level 1** — Jev alone, a few decisions per second.
@@ -22,9 +22,9 @@ configurations:
 | `tools/doom_jev_agent.py` | The agent. `--mode jev` / `--mode supervised` (`--supervisor anthropic\|openai\|dry`), `--check` preflight, `--realtime`, `--jev dry` (no key), `--log run.jsonl`. Stdlib HTTP only (urllib), needs just `websockets`. |
 | `tools/doom_agent_sim.py` | Simulator of the firmware `/agent` API (same JSON): 2 rooms, corridor, door with Doom semantics, imps, barrel, exit → intermission → E1M2, death → respawn, lockstep catch-up like the board, realtime `hold` mode. Scenario flags `--spawn X,Y,HEADING`, `--hp`, `--menu-secs`. |
 | `tools/tests/mock_servers.py` | Fake TypeSafe `/v1/systemone` (validates request shape, real response schema, synthetic 429s) + fake LLM (Anthropic Messages, OpenAI Chat). Whole two-level pipeline runs with no keys. |
-| `tools/firmware-realtime-agent-mode.patch` | Optional firmware patch (not applied to `main/`): `{"hold": true}` = free-running agent mode. |
+| `tools/firmware-realtime-agent-mode.patch` | The `{"hold": true}` free-running agent mode as a patch; already applied in `main/` since v0.5.0, kept for reference. |
 | `tools/README.md`, `tools/requirements.txt` | Docs for all of the above (no new dependencies). |
-| `_flash_realtime/` (local only, `*.bin`/`*.elf` are gitignored) | Prebuilt images of `ai-agent-api` + the realtime patch, `FLASH.txt` with the esptool commands, `SHA256SUMS`. |
+| `binaries/scintix-p4-doom-vX.Y.Z/` | Prebuilt images of each release (committed), `flash.bat COMx [full\|app\|erase]` and a `README.txt` with the plain esptool commands. |
 
 ## TypeSafe / Jev API (as documented at docs.typesafe.ai, Sept 2026)
 
@@ -222,12 +222,11 @@ configurations:
 
 ## Next steps
 
-1. Flash (`_flash_realtime/FLASH.txt`, or apply the patch and `idf.py build app-flash`),
-   check `chip revision` and the IP on the serial log.
+1. Flash a release (`binaries/.../flash.bat COMx`, or `idf.py build app-flash`),
+   check `chip revision` and the IP (Wi-Fi or Ethernet) on the serial log.
 2. `python tools\doom_jev_agent.py <IP> --mode supervised --check`, then level 1,
    level 2, then `--realtime`. Keep the `--log` JSONL files.
 3. Tune `MACROS` descriptions / `build_questions` from the real logs.
-4. Housekeeping: merge `ai-agent-api` into `master` (origin/master's README already
-   describes the agent); pin `CONFIG_ESP32P4_REV_MIN_301=y` in `sdkconfig.defaults`;
+4. Housekeeping (the merge into `master` is done): pin `CONFIG_ESP32P4_REV_MIN_301=y` in `sdkconfig.defaults`;
    README says 32 MB flash but `sdkconfig` is 16 MB; `pytest_doom_p4.py` is Espressif
    boilerplate; delete the stale `Claude outputs/` folder (old pre-review patch).

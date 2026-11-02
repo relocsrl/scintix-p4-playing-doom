@@ -498,9 +498,9 @@ static void ppa_lazy_init(void)
 
     /* The scale factor quantizes to 3.1875x (1020 px), so PPA never writes the
      * rightmost ~4 columns, nor any letterbox rows. Clear every frame buffer to
-     * black once now so those untouched regions don't show stale boot/test-
-     * pattern data (which, differing between the two buffers, flickered as we
-     * page-flipped). PPA never overwrites them again, so this stays black. */
+     * black once now so those untouched regions never show stale data (which,
+     * differing between the two buffers, flickered as we page-flipped). PPA
+     * never overwrites them again, so this stays black. */
     const size_t fb_size = (size_t)PANEL_DISPLAY_WIDTH * PANEL_DISPLAY_HEIGHT * sizeof(uint16_t);
     for (int i = 0; i < s_dpi_num_fbs; i++) {
         memset(s_dpi_fbs[i], 0, fb_size);

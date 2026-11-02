@@ -85,11 +85,13 @@ and [`docs/jev-agent-notes.md`](docs/jev-agent-notes.md).
 - **MCU**: ESP32-P4 (rev. v3.1/v3.2), 32 MB hex PSRAM, 32 MB flash.
 - **Wireless co-processor**: ESP32-C6 over SDIO (4-bit); Wi-Fi/BLE provided to the P4
   via `esp_hosted` / `esp_wifi_remote`.
+- **Ethernet**: on-module Microchip **KSZ8091RNA** PHY on the P4's EMAC (RMII); the RJ45
+  is on the carrier (e.g. the Raspberry Pi CM4/CM5 IO board).
 - **Display**: 7" **1024×600 MIPI-DSI** panel driven by the **EK79007** controller (landscape).
 - **Audio**: **ES8311** I²S codec + speaker — tested with the external
   [M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase).
 - **Controls**: wired **USB** — a standard USB keyboard **or** a USB gamepad
-  (DualShock 4 / generic HID). The AI plays over Wi-Fi (MCP, or the `/agent` API for
+  (DualShock 4 / generic HID). The AI plays over the network (MCP, or the `/agent` API for
   Jev), no controller needed.
 
 ## What this fork changes vs. the original
@@ -133,6 +135,7 @@ Together these bring the game to a steady **~30 FPS** — Doom's own software re
 ## Software features
 
 - Wi-Fi in **AP mode + captive portal** for first-time setup, then station mode.
+- **Ethernet** (DHCP) alongside Wi-Fi: plug a cable into the carrier's RJ45, no setup.
 - Web server to tweak display (rotation, colour, FPS overlay) and audio (volume) settings.
 - WAD shipped in SPIFFS (shareware `doom1.wad`, forked from
   [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads)).
@@ -180,7 +183,7 @@ Each release ships ready-to-flash images in [`binaries/`](binaries/)
 esptool commands. With Python and esptool 5.x (`pip install "esptool>=5"`):
 
 ```bat
-binaries\scintix-p4-doom-v0.5.1\flash.bat COM5
+binaries\scintix-p4-doom-v0.6.0\flash.bat COM5
 ```
 
 `flash.bat COM5 app` updates the firmware only (keeps the WAD, Wi-Fi and settings);
@@ -192,13 +195,18 @@ binaries\scintix-p4-doom-v0.5.1\flash.bat COM5
 - If colours look swapped/inverted, adjust them in the web settings page.
 - **Quit Game** restarts the board (there's no OS to quit to).
 
-## Wi-Fi portal
+## Network: Wi-Fi portal and Ethernet
 
 - On first boot the device starts an **open Access Point** (SSID `SCINTIX-P4-XXXXXX`,
   suffix derived from the MAC) and a captive portal.
 - Connect, enter your Wi-Fi SSID and password, and save.
-- Use the serial monitor or a network scanner to find the device IP, then open it in a
-  browser for the settings page — or point the MCP server at `ws://<ip>/agent`.
+- **Ethernet** needs no setup: with a cable in the carrier's RJ45 the board gets an
+  address by DHCP and logs `Ethernet up with IP ...`. It runs alongside Wi-Fi (the setup
+  AP above stays up until Wi-Fi is configured). Turn it off with
+  `CONFIG_SCINTIX_ETHERNET` (menuconfig → *SCINTIX P4 board*).
+- Use the serial monitor or your router's client list (hostname `scintix-p4-xxxxxx`) to
+  find the device IP, then open it in a browser for the settings page — or point the
+  MCP server at `ws://<ip>/agent`. Both the Wi-Fi and the Ethernet address work.
 
 ## Links & references
 

@@ -22,4 +22,25 @@ config SCINTIX_USB_A_PWR_EN_GPIO
         The ESP32-P4 GPIO driven high at boot to enable the CM IO board's USB
         Type-A 5V power switch. GPIO23 on SCINTIX P4 rev 1.2.
 
+config SCINTIX_ETHERNET
+    bool "On-module Ethernet (KSZ8091RNA PHY)"
+    default y
+    help
+        Bring up the SCINTIX P4 on-module Ethernet (ESP32-P4 EMAC + Microchip
+        KSZ8091RNACA PHY over RMII) with DHCP, alongside Wi-Fi. Needs a carrier
+        with an RJ45, e.g. the Raspberry Pi CM4/CM5 IO board. The web settings
+        page and the /agent WebSocket answer on every interface.
+
+config SCINTIX_ETH_PHY_ADDR
+    int "Ethernet PHY address"
+    depends on SCINTIX_ETHERNET
+    default 0
+    range 0 31
+
+config SCINTIX_ETH_PHY_RST_GPIO
+    int "Ethernet PHY reset GPIO (-1 = none)"
+    depends on SCINTIX_ETHERNET
+    default 51
+    range -1 56
+
 endmenu

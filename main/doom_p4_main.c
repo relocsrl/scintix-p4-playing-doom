@@ -36,6 +36,7 @@
 #include "audio_doom.h"
 #include "doom_agent.h"
 #include "doom_port.h"
+#include "eth_net.h"
 #include "panel_display.h"
 #include "usb_gamepad.h"
 #include "bsp/esp-bsp.h"
@@ -197,6 +198,14 @@ static void get_portal_ssid(char *ssid, size_t ssid_len)
     snprintf(ssid, ssid_len, "SCINTIX-P4-%02X%02X%02X", mac[3], mac[4], mac[5]);
 }
 
+/* DHCP hostname, so the board shows up by name in the router's client list. */
+static void get_device_hostname(char *hostname, size_t hostname_len)
+{
+    uint8_t mac[6] = {};
+    ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_BASE));
+    snprintf(hostname, hostname_len, "scintix-p4-%02x%02x%02x", mac[3], mac[4], mac[5]);
+}
+
 static void portal_send_page(httpd_req_t *req, const char *status)
 {
     const char *status_text = status ? status : "Choose your Wi-Fi network and save it.";
@@ -223,7 +232,9 @@ static void portal_send_page(httpd_req_t *req, const char *status)
 
 static esp_err_t portal_root_get_handler(httpd_req_t *req)
 {
-    if (wifi_has_saved_credentials()) {
+    /* The Wi-Fi setup page is only the landing page while the board has no
+     * network at all; over Ethernet go straight to the settings. */
+    if (wifi_has_saved_credentials() || eth_net_has_ip()) {
         httpd_resp_set_status(req, "302 Temporary Redirect");
         httpd_resp_set_hdr(req, "Location", "/settings");
         httpd_resp_sendstr(req, "Redirecting to settings");
@@ -804,6 +815,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         ESP_LOGI(NET_TAG, "Connected to Wi-Fi with IP " IPSTR, IP2STR(&event->ip_info.ip));
         ESP_ERROR_CHECK_WITHOUT_ABORT(start_portal_servers());
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(NET_TAG, "Ethernet up with IP " IPSTR ": settings http://" IPSTR "/settings, agent ws://" IPSTR "/agent",
+                 IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.ip));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(start_portal_servers());
     }
 }
 
@@ -864,7 +880,7 @@ static esp_err_t connect_wifi_netif(esp_netif_t *netif, esp_event_base_t event_b
     return ESP_OK;
 }
 
-static void init_wifi_with_portal(void)
+static void init_network(void)
 {
     init_nvs();
     ESP_ERROR_CHECK_WITHOUT_ABORT(panel_display_load_settings());
@@ -885,6 +901,21 @@ static void init_wifi_with_portal(void)
         return;
     }
 
+    char hostname[24] = {};
+    get_device_hostname(hostname, sizeof(hostname));
+
+#if CONFIG_SCINTIX_ETHERNET
+    /* Ethernet first and independent of Wi-Fi: it works even if the C6 link
+     * or the Wi-Fi setup below fails. Both interfaces serve the same pages. */
+    err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, wifi_event_handler, NULL);
+    if (err == ESP_OK) {
+        err = eth_net_start(hostname);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(NET_TAG, "Ethernet unavailable: %s", esp_err_to_name(err));
+    }
+#endif
+
     esp_netif_inherent_config_t sta_netif_config = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
     esp_netif_inherent_config_t ap_netif_config = ESP_NETIF_INHERENT_DEFAULT_WIFI_AP();
     s_sta_netif = esp_netif_create_wifi(WIFI_IF_STA, &sta_netif_config);
@@ -893,6 +924,7 @@ static void init_wifi_with_portal(void)
         ESP_LOGE(NET_TAG, "Wi-Fi netif creation failed");
         return;
     }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_hostname(s_sta_netif, hostname));
 
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     if (err == ESP_OK) {
@@ -968,7 +1000,7 @@ void app_main(void)
     ESP_ERROR_CHECK(bsp_display_backlight_on());
 
     ESP_LOGI(TAG, "Doom P4 bringup complete");
-    init_wifi_with_portal();
+    init_network();
 
 #if CONFIG_SCINTIX_BOARD_REV_1_2
     /* Board rev 1.2: this GPIO drives the CM4/CM5 IO board's USB Type-A (host) 5V

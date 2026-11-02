@@ -3,7 +3,7 @@
 Tools to drive DOOM running on the SCINTIX P4 from a computer, and to let an AI
 play it — an LLM via MCP, or TypeSafe's **Jev** (a fast "System One" model) at
 several decisions per second, alone or supervised by an LLM. They talk to the
-firmware's **`/agent` WebSocket** (the `ai-agent-api` branch), which runs the game
+firmware's **`/agent` WebSocket**, which by default runs the game
 in **lockstep**: you send an action, the game advances a few tics, and you get
 back a structured observation.
 
@@ -19,9 +19,12 @@ back a structured observation.
 
 ## 0. Prerequisites
 
-- Firmware from the **`ai-agent-api`** branch flashed on the device.
-- The device on the network — note its IP from the serial log (`got ip ...`), or
-  use `192.168.4.1` if it's running the captive-portal AP (`SCINTIX-P4-XXXXXX`).
+- Firmware v0.5.0 or later on the device: a build from `master`, or the prebuilt
+  images in [`../binaries/`](../binaries/).
+- The device on the network, over Wi-Fi or Ethernet (a cable in the carrier's RJ45,
+  DHCP). Note its IP from the serial log (`Connected to Wi-Fi with IP ...` /
+  `Ethernet up with IP ...`), look for `scintix-p4-xxxxxx` in your router's client
+  list, or use `192.168.4.1` if it's running the captive-portal AP (`SCINTIX-P4-XXXXXX`).
 - **Python 3.10+** on the PC.
 
 Install the deps (a virtualenv is recommended):
@@ -151,7 +154,7 @@ The run also takes care of the game around the reflexes: when the marine **dies*
 it waits a second and presses USE (the level restarts); when **nothing changes**
 for `--frozen-after 8` steps whatever it presses — the end-of-level stats screen —
 it presses USE to move on (and tells you to press Esc on the keyboard if a menu is
-open); when the **Wi-Fi link drops** it reconnects (up to 10 attempts) and resumes.
+open); when the **network link drops** it reconnects (up to 10 attempts) and resumes.
 
 Every step prints one live line — a **radar of what Jev sees** and the **macro it
 chose**, colour-coded (nice next to the game on screen / on video):
@@ -263,7 +266,7 @@ instead. `--policy sample` still samples everywhere.
 
 ### Pacing: lockstep vs. real time
 
-The firmware's `/agent` is **lockstep**: the game is frozen while we think. A step
+By default `/agent` is **lockstep**: the game is frozen while we think. A step
 is `Jev latency (~150–300 ms) + tics × 28.6 ms` of device time, so with the default
 macros (8 tics ≈ 0.23 s) the game runs at roughly **50–70 % of real time**, 2–3
 decisions/s, and the marine moves in small bursts — much smoother than an LLM over
@@ -276,25 +279,23 @@ where the macro says. Jev calls time out after `--jev-timeout 2` s, well under t
 board's 5 s agent watchdog (past it the board would resume local play until the
 next request).
 
-**Free-running mode (`--realtime`).** With the small firmware patch in
-`tools/firmware-realtime-agent-mode.patch` (files `main/doom_agent.[ch]`,
-`main/doom_port.c`; review it, `git apply` from the repo root, `idf.py build flash`)
-the action accepts `"hold": true`: the game **never pauses**, each decision just
+**Free-running mode (`--realtime`).** Since v0.5.0 the firmware's action also
+accepts `"hold": true`: the game **never pauses**, each decision just
 replaces the keys being held and is answered at once, and `tics` becomes the
 auto-release timeout (a vanished controller never leaves the marine running into a
 wall). The agent then runs at Jev's pace — **~5–8 decisions/s at 100 % game speed**
 in the simulator with a 130 ms model latency — and turns/moves last exactly as long
 as the model keeps choosing them (or the macro's duration if the next decision is
-late). If the board still runs the unpatched firmware, the agent notices (replies
-as slow as lockstep) and says so; it keeps working, in lockstep. The simulator already supports it:
+late). A request without `hold` is still lockstep, so the same firmware serves both
+modes. On firmware older than v0.5.0 the agent notices (replies as slow as lockstep)
+and says so; it keeps working, in lockstep. The simulator supports it too:
 
 ```bash
-python doom_jev_agent.py <device-ip> --realtime                       # after flashing the patch
+python doom_jev_agent.py <device-ip> --realtime
 python doom_jev_agent.py localhost --port 8765 --jev dry --realtime   # against the simulator
 ```
-The patch builds cleanly with ESP-IDF v5.5.4 for esp32p4 (same sdkconfig and
-components as this repo) but has **not yet run on the board** — treat it as a
-reviewed draft. Undo with `git checkout -- main/doom_agent.h main/doom_agent.c main/doom_port.c`.
+`tools/firmware-realtime-agent-mode.patch` is that firmware change as a patch, kept
+for reference: it is already applied in `main/`.
 
 ### Troubleshooting
 
