@@ -116,6 +116,11 @@ and [`docs/jev-agent-notes.md`](docs/jev-agent-notes.md).
   per-pixel divide) plus identical-row `memcpy` dedup — stays in place for the cases the
   PPA fast path doesn't cover (colour adjustment, 90°/270° rotation).
 - **Build/runtime tuning**: `-O2`, PSRAM @ 250 MHz, flash QIO, 1 kHz FreeRTOS tick.
+- **Fast startup: WAD in PSRAM.** Doom reads hundreds of scattered lumps while it
+  starts, and SPIFFS seeks inside the 4 MB WAD are slow (~40 s of black screen). The
+  WAD is now copied to PSRAM in one sequential read (~1.3 s) and served read-only from
+  RAM (`main/wad_mem.c`, a tiny VFS at `/wadmem`): **DOOM is on screen ~6 s after
+  power-on**, and new sprites no longer hitch mid-game.
 - **USB keyboard + gamepad.** A standard USB keyboard (arrows = move/turn, **Ctrl** =
   fire, **Space** = use/open, **Shift** = run, **Alt** or **`,`/`.`** = strafe,
   **`1`–`7`** = weapon select, **Esc/Enter/Tab** = menu/confirm/automap) **or** a USB
@@ -183,7 +188,7 @@ Each release ships ready-to-flash images in [`binaries/`](binaries/)
 esptool commands. With Python and esptool 5.x (`pip install "esptool>=5"`):
 
 ```bat
-binaries\scintix-p4-doom-v0.6.0\flash.bat COM5
+binaries\scintix-p4-doom-v0.6.1\flash.bat COM5
 ```
 
 `flash.bat COM5 app` updates the firmware only (keeps the WAD, Wi-Fi and settings);
@@ -191,7 +196,7 @@ binaries\scintix-p4-doom-v0.6.0\flash.bat COM5
 
 ## First boot
 
-- The screen stays black for a moment, then DOOM starts.
+- The screen stays black for a few seconds (the WAD is copied to PSRAM), then DOOM starts.
 - If colours look swapped/inverted, adjust them in the web settings page.
 - **Quit Game** restarts the board (there's no OS to quit to).
 

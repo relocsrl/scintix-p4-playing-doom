@@ -39,6 +39,10 @@ esp_err_t eth_net_start(const char *hostname)
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr = CONFIG_SCINTIX_ETH_PHY_ADDR;
     phy_config.reset_gpio_num = CONFIG_SCINTIX_ETH_PHY_RST_GPIO;
+    /* Don't block boot in esp_eth_start() waiting for autonegotiation (4 s
+     * without a cable): the PHY keeps negotiating and the driver's periodic
+     * link check reports the link when it comes up. */
+    phy_config.autonego_timeout_ms = 0;
 
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_ksz80xx(&phy_config);

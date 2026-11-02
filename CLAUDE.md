@@ -6,7 +6,8 @@ mazur888's ESP32-P4 port. ESP-IDF **v5.5.4**, target `esp32p4`, chip rev **v3.1+
 - Firmware: `main/` (display via the vendored `esp32_p4_function_ev_board_noglib` BSP
   → EK79007 1024×600 + PPA scaler, USB HID input, ES8311 audio, Ethernet
   (`eth_net.c`, KSZ8091 PHY), Wi-Fi portal/web settings, `/agent` WebSocket in
-  `doom_agent.c` + `doom_port.c`).
+  `doom_agent.c` + `doom_port.c`; the WAD is copied from SPIFFS to PSRAM at boot
+  and served from `/wadmem` by `wad_mem.c`, since SPIFFS random reads made startup ~40 s).
   `components/doomgeneric` is the almost untouched Doom core.
 - Tools: `tools/` — `agent_client.py` (REPL), `doom_mcp_server.py` (LLM via MCP),
   `doom_jev_agent.py` (TypeSafe Jev, level 1/2), `doom_agent_sim.py` (board-free

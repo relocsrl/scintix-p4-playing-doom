@@ -20,6 +20,7 @@
 #include "panel_display.h"
 #include "usb_gamepad.h"
 #include "doom_agent.h"
+#include "wad_mem.h"
 
 /* Doom engine internals, for the agent's state capture. The doomgeneric
  * component exports its src/ directory as a public include dir. */
@@ -909,9 +910,16 @@ static void doom_task(void *arg)
         return;
     }
 
+    char *wad_path = DOOM_WAD_PATH;
+    if (wad_mem_load(DOOM_WAD_PATH, "doom1.wad") == ESP_OK) {
+        wad_path = WAD_MEM_BASE "/doom1.wad";
+    } else {
+        ESP_LOGW(TAG, "Could not copy the WAD to PSRAM; reading it from SPIFFS (slow startup)");
+    }
+
     char *argv[] = {
         "doomgeneric",
-        "-iwad", DOOM_WAD_PATH,
+        "-iwad", wad_path,
         "-config", "/spiffs/doom.cfg",
         "-extraconfig", "/spiffs/doom-extra.cfg",
         "-mb", "8",
