@@ -183,16 +183,18 @@ MACROS = {
     "turn_left": dict(
         action={"turn": "left"}, tics=turn_tics(30),
         desc="Turn left in place about 30 degrees, no movement. Use to face an "
-             "enemy or an opening on the left (bearing < -15), to turn toward "
-             "best_seen when its bearing < -15, to follow a commander turn_hint of "
+             "enemy or an opening on the left (bearing < -25), to turn toward "
+             "best_seen when its bearing < -25 (closer than that it overshoots: use "
+             "forward_left or turn_left_small), to follow a commander turn_hint of "
              "`left` when ahead is not an open path, or to look for a way out when ahead "
              "is blocked (or progress.going_nowhere) and the left side has more room. "
              "Wrong right after turning right while standing still (that is the sweep loop)."),
     "turn_right": dict(
         action={"turn": "right"}, tics=turn_tics(30),
         desc="Turn right in place about 30 degrees, no movement. Use to face an "
-             "enemy or an opening on the right (bearing > 15), to turn toward "
-             "best_seen when its bearing > 15, to follow a commander turn_hint of "
+             "enemy or an opening on the right (bearing > 25), to turn toward "
+             "best_seen when its bearing > 25 (closer than that it overshoots: use "
+             "forward_right or turn_right_small), to follow a commander turn_hint of "
              "`right` when ahead is not an open path, or to look for a way out when ahead "
              "is blocked (or progress.going_nowhere) and the right side has more room. "
              "Wrong right after turning left while standing still (that is the sweep loop)."),
@@ -379,9 +381,14 @@ STATE_LEGEND = (
     "spot) is the most open direction you SAW in the last turns, including directions "
     "now behind you {heading, dist, bearing from where you face now, side}: the view "
     "only spans +/-45, so turning back and forth to 'look again' just re-discovers it. "
-    "Turn toward best_seen.bearing (big turns until |bearing| <= 15) and then go "
-    "`forward`; once it is ahead (|bearing| <= 10) and ahead_min_dist is clear, walk, "
-    "do not turn away again. "
+    "Turn toward best_seen.bearing and then go: a big turn (turn_left / turn_right) is "
+    "~34 deg, so use it only while |bearing| > 25; with |bearing| 10-25 use "
+    "forward_left / forward_right (walk while curving toward it) or a small turn - a "
+    "big turn there overshoots to the other side and the next one brings you back, "
+    "forever; with |bearing| <= 10 and ahead_min_dist clear, `forward`. Never undo the "
+    "turn you just made (any left turn right after a right turn, or vice versa, while "
+    "standing still): that is replaced by a curving walk (forward_left / "
+    "forward_right) or by more turning the same way. "
     "`heading` is a compass heading, 0 = north, 90 = east. "
     "`commander` (when present) is the strategic layer's current intent: "
     "`turn_hint` says which way to turn to get on the requested heading. It is a "
@@ -1299,6 +1306,9 @@ STRAIGHT_MOVES = {m for m in MOVE_MACROS if not MACROS[m]["action"].get("turn")}
 FORWARD_MOVES = {m for m in STRAIGHT_MOVES if MACROS[m]["action"].get("move") == "forward"
                  and not MACROS[m]["action"].get("strafe")}
 WALK_TOWARD = {m for m in MOVE_MACROS if MACROS[m]["action"].get("move") == "forward"}
+TURN_SIDE = {"turn_left": "left", "turn_left_small": "left",      # turns in place (no move)
+             "turn_right": "right", "turn_right_small": "right"}
+NO_UNDO_ROOM = 64      # clearance ahead to walk out of a turn-undo loop (the marine is 32 wide)
 
 
 def is_oscillating(recent, n=4):
@@ -2177,6 +2187,26 @@ def run(args):
                             macro = "forward" if wall_ahead >= 120 and not obs.get("blocked") else "turn_right"
                         mem.heuristic_overrides += 1
                         flags.append("no-spin")
+                    # - a turn in place straight after a turn the other way undoes it (same
+                    #   class as two turn_arounds). On the board a big turn is ~34 deg, so
+                    #   with the open direction in between (bearing +13 -> turn right -> -21
+                    #   -> turn left -> +13 ...) the marine never gets within +/-10 to walk:
+                    #   468 of 1024 decisions in one L2 run. Mixing big and small turns
+                    #   (R, l, L, r, ...) is the same loop. So: walk while curving the way
+                    #   Jev wants if there is room ahead, else keep turning the way it was
+                    #   already turning (a full look round in ~11 steps, no back-and-forth).
+                    prev = mem.recent[-1] if mem.recent else None
+                    if mech and macro in TURN_SIDE and prev in TURN_SIDE and TURN_SIDE[macro] != TURN_SIDE[prev] \
+                            and not hostiles(obs.get("visible", [])) and door_st not in ("working", "retry"):
+                        hazards = [t for t in obs.get("visible", []) if t["name"] in NON_HOSTILE]
+                        clear = obstacle_ahead(min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6),
+                                                   default=RAY_RANGE), hazards)
+                        if clear >= NO_UNDO_ROOM and not obs.get("blocked"):
+                            macro = f"forward_{TURN_SIDE[macro]}"
+                        else:
+                            macro = f"turn_{TURN_SIDE[prev]}"
+                        mem.heuristic_overrides += 1
+                        flags.append("no-undo")
                     # - repeated blocked moves -> turn toward the most open direction
                     if extra and mem.consecutive_blocked >= args.unstick_after and macro in MOVE_MACROS:
                         macro = unstick_macro(obs, mem)

@@ -235,6 +235,20 @@ configurations:
   `wont_open`, and the marine swung left/right in front of it for 25 decisions (~1
   min). Now `use_reaches()`: <= 64, or <= 80 only right after a forward move;
   approach-door and the press counter both use it; criteria say `dist <= 60`.
+- **Turn / counter-turn in place (fixed 2026-11-02, L2 realtime run):** 763 of 1024
+  decisions were a turn opposite to the previous one, standing still, no enemy in
+  view (e.g. steps 905-948: heading 312 <-> 346 with best_seen at 325, 714 open).
+  A big turn is ~34 deg on the board, the instructions asked |bearing| <= 10 before
+  walking, so with the target in between Jev overshot one way, then the other,
+  forever. New `--nets doom` mechanic `no-undo` (same class as `no-spin`: an action
+  that undoes the previous one): a turn in place (big or small) opposite to the
+  previous turn in place, with no hostile in view and no door being worked, becomes
+  `forward_<Jev's side>` if >= 64 units are clear ahead, else the previous turn again
+  (keep sweeping one way). Legend/criteria: big turns only for |bearing| > 25, 10-25
+  = forward_left/right or a small turn. Sim with a policy mimicking the log (big
+  turns only, walk only within +/-10): no-enemy stretch zig-zags forward ~760 units
+  in 30 steps instead of turning in place; DryJev regressions unchanged (net never
+  fires). **Not yet run with real Jev.**
 - **Game handling** (always on): death → wait 1 s, USE (level restarts); "frozen"
   game (8 steps with no change at all = intermission, or a menu) → USE/wait pulses,
   then "press Esc" hint; WebSocket/Wi-Fi loss → reconnect (10 attempts, backoff);
