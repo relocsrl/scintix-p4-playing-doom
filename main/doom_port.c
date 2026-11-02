@@ -610,6 +610,8 @@ static const char *weapon_name(weapontype_t w)
 #define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
 static fixed_t s_ray_hit_frac;
 static line_t *s_ray_hit_line;    /* the line the ray stopped at */
+static fixed_t s_ray_exit_frac;   /* first EXIT-marked wall surface seen along the ray (-1 = none) */
+static line_t *s_ray_exit_line;
 static boolean s_ray_hit_is_door; /* hit line is a two-sided line currently too closed to pass */
 static boolean s_ray_hit_is_lift; /* ...or a raised lift (step too high, lift special on the line) */
 static fixed_t s_ray_floor;       /* floor height of the sector the ray is currently in */
@@ -645,8 +647,10 @@ static boolean agent_is_lift_special(short special)
     }
 }
 
-/* What a USE does on a line with this special (P_UseSpecialLine's manual doors and
- * switches; walk-over specials do nothing on USE): NULL = nothing. */
+/* What a player sees a USE-able line as (P_UseSpecialLine's manual doors and
+ * switches; walk-over specials do nothing on USE): NULL = nothing. Only what is on
+ * screen: an exit switch is just a switch (which one ends the level is for the
+ * player to find out). */
 static const char *agent_use_kind(short special)
 {
     switch (special) {
@@ -654,8 +658,7 @@ static const char *agent_use_kind(short special)
         return "door";
     case 21: case 62: case 122: case 123:
         return "lift";
-    case 11: case 51:
-        return "exit";
+    case 11: case 51: /* exit switches */
     case 7: case 9: case 14: case 15: case 18: case 20: case 23: case 29: case 41: case 42:
     case 43: case 45: case 49: case 50: case 55: case 60: case 61: case 63: case 64: case 65:
     case 66: case 67: case 68: case 69: case 70: case 71: case 99: case 101: case 102: case 103:
@@ -720,10 +723,72 @@ static void agent_probe_use(const player_t *pl, mobj_t *pm, doom_agent_obs_t *o)
     }
 }
 
+/* EXIT signs: the textures with "EXIT" written on them (EXITSIGN above a door,
+ * EXITDOOR, the SW1EXIT / SW2EXIT switch). What a player reads on screen, so
+ * the agent gets it only when a ray of the view actually reaches that wall. */
+#define AGENT_EXIT_SIGN_RANGE 1024 /* map units: close enough to read */
+static short s_exit_tex[4];
+static boolean s_exit_tex_init;
+static uint8_t *s_exit_seen;   /* per line of the current level: an EXIT surface was seen */
+static int s_exit_seen_numlines;
+static line_t *s_exit_seen_lines; /* the level these flags belong to */
+
+static boolean agent_is_exit_tex(short tex)
+{
+    if (!s_exit_tex_init) {
+        static char *names[4] = {"EXITSIGN", "EXITDOOR", "SW1EXIT", "SW2EXIT"};
+        for (int i = 0; i < 4; i++) {
+            s_exit_tex[i] = (short)R_CheckTextureNumForName(names[i]); /* -1 if absent */
+        }
+        s_exit_tex_init = true;
+    }
+    for (int i = 0; i < 4; i++) {
+        if (tex > 0 && tex == s_exit_tex[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The side of `li` facing the ray start shows an EXIT texture (any part). */
+static boolean agent_line_shows_exit(line_t *li)
+{
+    int side = P_PointOnLineSide(trace.x, trace.y, li);
+    if (li->sidenum[side] < 0) {
+        return false;
+    }
+    const side_t *sd = &sides[li->sidenum[side]];
+    return agent_is_exit_tex(sd->toptexture) || agent_is_exit_tex(sd->midtexture) ||
+           agent_is_exit_tex(sd->bottomtexture);
+}
+
+/* Remember which lines showed an EXIT sign (reset on a new level), for the map. */
+static void agent_note_exit_seen(const line_t *li)
+{
+    if (s_exit_seen_lines != lines || s_exit_seen_numlines != numlines) {
+        free(s_exit_seen);
+        s_exit_seen = calloc(numlines, 1);
+        s_exit_seen_numlines = s_exit_seen ? numlines : 0;
+        s_exit_seen_lines = lines;
+    }
+    if (s_exit_seen != NULL) {
+        s_exit_seen[li - lines] = 1;
+    }
+}
+
+static boolean agent_exit_seen(int i)
+{
+    return s_exit_seen != NULL && s_exit_seen_lines == lines && i < s_exit_seen_numlines && s_exit_seen[i];
+}
+
 static boolean agent_ray_traverse(intercept_t *in)
 {
     line_t *li = in->d.line;
     boolean blocking;
+    if (s_ray_exit_frac < 0 && agent_line_shows_exit(li)) {
+        s_ray_exit_frac = in->frac;
+        s_ray_exit_line = li;
+    }
     boolean is_door = false;
     boolean is_lift = false;
     if (!(li->flags & ML_TWOSIDED) || (li->flags & ML_BLOCKING) ||
@@ -791,6 +856,8 @@ static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door, boolean
     fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
     s_ray_hit_frac = 0;
     s_ray_hit_line = NULL;
+    s_ray_exit_frac = -1;
+    s_ray_exit_line = NULL;
     s_ray_hit_is_door = false;
     s_ray_hit_is_lift = false;
     s_ray_floor = s_ray_base = pm->subsector->sector->floorheight;
@@ -891,11 +958,23 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     int ray_mid = (DOOM_AGENT_NUM_RAYS - 1) / 2;
     int best_door_absb = 1000; /* most-central door ray seen so far, by |bearing| */
     line_t *door_line = NULL;
+    int best_exit_absb = 1000;
+    line_t *exit_line = NULL;
     for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
         int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
         boolean is_door = false;
         boolean is_lift = false;
         agent_cast_ray(pm, bearing, &is_door, &is_lift, &o->walls[i]);
+        /* An EXIT sign this ray reaches, close enough to read: in view now, and
+         * remembered for the map from now on. */
+        if (s_ray_exit_line != NULL && agent_frac_dist(s_ray_exit_frac) <= AGENT_EXIT_SIGN_RANGE) {
+            agent_note_exit_seen(s_ray_exit_line);
+            int absb = bearing < 0 ? -bearing : bearing;
+            if (absb < best_exit_absb) {
+                best_exit_absb = absb;
+                exit_line = s_ray_exit_line;
+            }
+        }
         /* Report the closed door/passage in view so the agent can tell a re-shut
          * door (press use again) from a solid wall (go around). A door usually
          * spans several rays: take the line of the most central one. */
@@ -918,9 +997,13 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         fixed_t my = door_line->v1->y / 2 + door_line->v2->y / 2;
         o->door_ahead_bearing = agent_bearing_to(pm, mx, my);
         o->door_ahead_dist = P_AproxDistance(mx - pm->x, my - pm->y) >> FRACBITS;
-        /* A window, a door only a switch opens, or a walk-over lift is "shut" but
-         * USE does nothing on it. */
-        o->door_ahead_usable = agent_use_kind(door_line->special) != NULL;
+    }
+    if (exit_line != NULL) {
+        fixed_t mx = exit_line->v1->x / 2 + exit_line->v2->x / 2;
+        fixed_t my = exit_line->v1->y / 2 + exit_line->v2->y / 2;
+        o->exit_sign_valid = true;
+        o->exit_sign_bearing = agent_bearing_to(pm, mx, my);
+        o->exit_sign_dist = P_AproxDistance(mx - pm->x, my - pm->y) >> FRACBITS;
     }
 
     agent_probe_use(pl, pm, o);
@@ -931,6 +1014,7 @@ static void agent_capture_obs(doom_agent_obs_t *o)
 static int agent_glyph_prio(char ch)
 {
     switch (ch) {
+    case 'E': return 4;
     case '#': return 3;
     case '~': return 2;
     case ':': return 1;
@@ -1036,14 +1120,16 @@ static void agent_render_map(doom_agent_map_t *m)
     m->origin_y = maxy; /* row 0 = north (max y) */
 
     for (int i = 0; i < numlines; i++) {
-        if (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW)) {
+        boolean exit_seen = agent_exit_seen(i);
+        if (!exit_seen && (!(lines[i].flags & ML_MAPPED) || (lines[i].flags & ML_DONTDRAW))) {
             continue;
         }
         int c1 = ((lines[i].v1->x >> FRACBITS) - minx) / upc;
         int r1 = (maxy - (lines[i].v1->y >> FRACBITS)) / upc;
         int c2 = ((lines[i].v2->x >> FRACBITS) - minx) / upc;
         int r2 = (maxy - (lines[i].v2->y >> FRACBITS)) / upc;
-        char glyph = agent_line_glyph(&lines[i]);
+        /* 'E' = a wall with EXIT on it that the player has seen in the view. */
+        char glyph = exit_seen ? 'E' : agent_line_glyph(&lines[i]);
         if (glyph) {
             agent_plot(m, c1, r1, c2, r2, glyph);
         }

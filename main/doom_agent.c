@@ -130,11 +130,10 @@ static char *build_obs_json(const doom_agent_obs_t *o)
                 if (o->door_ahead_lift) {
                     cJSON_AddStringToObject(d, "kind", "lift");
                 }
-                cJSON_AddBoolToObject(d, "usable", o->door_ahead_usable);
             }
         }
-        /* What a USE pressed now would activate; always present (null = nothing)
-         * so a client can tell this firmware from one without the probe. */
+        /* What is under the crosshair within USE reach; always present (null =
+         * nothing) so a client can tell this firmware from one without the probe. */
         if (o->use_target) {
             cJSON_AddStringToObject(r, "use_target", o->use_target);
         } else {
@@ -142,6 +141,14 @@ static char *build_obs_json(const doom_agent_obs_t *o)
         }
         if (o->use_locked) {
             cJSON_AddBoolToObject(r, "use_locked", true);
+        }
+        /* An EXIT sign readable in the view (absent when none). */
+        if (o->exit_sign_valid) {
+            cJSON *e = cJSON_AddObjectToObject(r, "exit_sign");
+            if (e) {
+                cJSON_AddNumberToObject(e, "bearing", o->exit_sign_bearing);
+                cJSON_AddNumberToObject(e, "dist", o->exit_sign_dist);
+            }
         }
         /* True when a requested move barely shifted the player (ran into something). */
         cJSON_AddBoolToObject(r, "blocked", o->blocked);

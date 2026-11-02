@@ -74,12 +74,18 @@ typedef struct {
     int  door_ahead_bearing; /* relative to facing, + = right; can exceed +/-45 */
     int  door_ahead_dist;    /* map units to the middle of the door */
     bool door_ahead_lift;    /* it is a raised lift (USE lowers it, step on, it rises), not a door */
-    bool door_ahead_usable;  /* USE opens it (false: a window, a switch-operated door, a walk-over lift) */
-    /* What a USE pressed now would activate (the 64-unit trace along the facing
-     * that P_UseLines does): NULL = nothing (or a wall first: USE goes "oof"),
-     * else "door", "lift", "exit" or "switch". use_locked = a key door without the key. */
+    /* What is under the crosshair within USE reach (the 64-unit trace along the
+     * facing that P_UseLines does): NULL = nothing (or a wall first: USE goes "oof"),
+     * else "door", "lift" or "switch" - only what the player would see on screen
+     * (an exit switch is a "switch"). use_locked = a key door (colour-marked) the
+     * player has no key for. */
     const char *use_target;
     bool use_locked;
+    /* A wall with EXIT written on it (exit sign / exit door / exit switch) that a
+     * ray of the view reaches within 1024 units: bearing / dist to its middle. */
+    bool exit_sign_valid;
+    int  exit_sign_bearing;
+    int  exit_sign_dist;
     /* The floor under the player: damage per hit (every 32 tics) of a nukage /
      * slime / lava floor, 0 = safe; radiation suit tics left (protects from it). */
     int  floor_damage;
@@ -93,8 +99,9 @@ typedef struct {
  * the wall lines the player has already discovered, plus the player marker.
  * North is up. '#' = revealed wall (or a closed door / a step too high to climb),
  * ':' = a step edge that can be walked over (stairs), '~' = the edge of a
- * damaging floor, '@' = player, ' ' = undiscovered/empty (flat open boundaries
- * between sectors are not drawn).
+ * damaging floor, 'E' = a wall with EXIT on it that the player has seen in the
+ * view, '@' = player, ' ' = undiscovered/empty (flat open boundaries between
+ * sectors are not drawn).
  * No monsters or items (the real automap doesn't show them without cheats). */
 #define DOOM_AGENT_MAP_COLS 64
 #define DOOM_AGENT_MAP_ROWS 32

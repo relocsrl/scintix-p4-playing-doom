@@ -80,6 +80,8 @@ class Wall:
         self.door = door
         self.name = name
         self.mapped = False
+        self.exit_sign = False     # EXIT written on it (the firmware reports it once seen)
+        self.exit_seen = False
         # door state machine: closed -> opening -> open (waits) -> closing -> closed
         self.height = 0.0
         self.state = "closed"
@@ -191,6 +193,7 @@ def build_world():
     W.append(Wall(1900, 768, 1900, 1400, name="spurW"))
     W.append(Wall(2028, 768, 2028, 1400, name="spurE"))
     W.append(Wall(1900, 1400, 2028, 1400, name="spurN"))
+    W[-1].exit_sign = True     # an EXIT sign on the wall where the spur (and the level) ends
     # A pillar in room B to make the depth fan interesting
     rect(2100, 100, 2180, 180, name="pillar")
     return W
@@ -459,7 +462,7 @@ class World:
         if best_t is None or best_t > RAY_RANGE:
             return RAY_RANGE, None
         best_w.mapped = True
-        return int(best_t), best_w if best_w.door else None
+        return int(best_t), best_w
 
     def use_probe(self):
         """What a USE pressed now would hit: the first line within USE_RANGE along the
@@ -476,19 +479,30 @@ class World:
     def observation(self, blocked=False):
         walls = []
         door_wall, door_b = None, None
+        exit_wall, exit_b = None, None
         mid = (NUM_RAYS - 1) // 2
         for i in range(NUM_RAYS):
             bearing = int((i - mid) * 2 * FOV / (NUM_RAYS - 1))   # C division truncates toward zero
-            dist, hit_door = self.cast(bearing)
+            dist, hit = self.cast(bearing)
             walls.append({"bearing": bearing, "dist": dist})
-            if hit_door is not None and (door_b is None or abs(bearing) < abs(door_b)):
-                door_wall, door_b = hit_door, bearing
+            if hit is not None and hit.door and (door_b is None or abs(bearing) < abs(door_b)):
+                door_wall, door_b = hit, bearing
+            # like the firmware: an EXIT wall a ray reaches within 1024 units
+            if hit is not None and hit.exit_sign and dist <= 1024:
+                hit.exit_seen = True
+                if exit_b is None or abs(bearing) < abs(exit_b):
+                    exit_wall, exit_b = hit, bearing
         door = None
         if door_wall is not None:
             # like the firmware: bearing / dist to the middle of the door line
             mx, my = (door_wall.x1 + door_wall.x2) / 2, (door_wall.y1 + door_wall.y2) / 2
             door = {"bearing": int(round(self.bearing_to(mx, my))),
-                    "dist": int(math.hypot(mx - self.px, my - self.py)), "usable": True}
+                    "dist": int(math.hypot(mx - self.px, my - self.py))}
+        exit_sign = None
+        if exit_wall is not None:
+            mx, my = (exit_wall.x1 + exit_wall.x2) / 2, (exit_wall.y1 + exit_wall.y2) / 2
+            exit_sign = {"bearing": int(round(self.bearing_to(mx, my))),
+                         "dist": int(math.hypot(mx - self.px, my - self.py))}
         visible = []
         for t in self.things:
             if not t.alive:
@@ -512,6 +526,7 @@ class World:
             "walls": walls,
             **({"door_ahead": door} if door else {}),
             "use_target": self.use_probe(),
+            **({"exit_sign": exit_sign} if exit_sign else {}),
             "blocked": blocked,
         }
 
@@ -527,13 +542,13 @@ class World:
         upc = max((maxx - minx) // (MAP_COLS - 1) + 1, (maxy - miny) // (MAP_ROWS - 1) + 1, 16)
         grid = [[" "] * MAP_COLS for _ in range(MAP_ROWS)]
 
-        def plot(c1, r1, c2, r2):
+        def plot(c1, r1, c2, r2, ch="#"):
             dx, sx = abs(c2 - c1), 1 if c1 < c2 else -1
             dy, sy = -abs(r2 - r1), 1 if r1 < r2 else -1
             err = dx + dy
             while True:
                 if 0 <= c1 < MAP_COLS and 0 <= r1 < MAP_ROWS:
-                    grid[r1][c1] = "#"
+                    grid[r1][c1] = ch
                 if c1 == c2 and r1 == r2:
                     break
                 e2 = 2 * err
@@ -544,9 +559,9 @@ class World:
                     err += dx
                     r1 += sy
 
-        for w in mapped:
+        for w in sorted(mapped, key=lambda w: w.exit_seen):   # EXIT walls drawn last, on top
             plot((int(w.x1) - minx) // upc, (maxy - int(w.y1)) // upc,
-                 (int(w.x2) - minx) // upc, (maxy - int(w.y2)) // upc)
+                 (int(w.x2) - minx) // upc, (maxy - int(w.y2)) // upc, "E" if w.exit_seen else "#")
         pc, pr = (px - minx) // upc, (maxy - py) // upc
         if 0 <= pr < MAP_ROWS and 0 <= pc < MAP_COLS:
             grid[pr][pc] = "@"

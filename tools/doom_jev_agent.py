@@ -161,9 +161,10 @@ MACROS = {
              "is well above 120 (the path is clear of walls AND barrels) and nothing "
              "more urgent is in view; also up stairs (a sector with `climb`), and to get "
              "off a damaging floor when `floor.way_off` is ahead. Wrong when a barrel sits "
-             "in your path (ahead_min_dist small): sidestep or turn to go around it first; "
-             "wrong when `view.ahead_hurt_dist` is small and you have no radiation suit "
-             "(you would walk onto nukage/slime)."),
+             "in your path (ahead_min_dist small): sidestep or turn to go around it first. "
+             "`view.ahead_hurt_dist` small = you would step onto nukage/slime: fine to "
+             "cross a short stretch when that is the way on (explore / exit / commander "
+             "point there) and health is above ~40; prefer a dry path if one is in view."),
     "forward_long": dict(
         action={"move": "forward"}, tics=16,
         desc="Walk straight ahead a long stretch. Only when `view.ahead_min_dist` is "
@@ -234,16 +235,16 @@ MACROS = {
     "use": dict(
         action={"use": True}, tics=3,
         desc="Press USE: opens the door in front, lowers a lift (door_ahead.kind "
-             "`lift`), flips a switch. When `use_now` is present (not null) it tells "
-             "exactly what a USE pressed NOW would activate (door / lift / switch / "
-             "exit): press `use` then - `use_now: exit` ends the level, always press it. "
+             "`lift`), flips a switch. When `use_now` is present (not null) it is what "
+             "is under your crosshair within USE reach (door / lift / switch): press "
+             "`use` then; a switch you have not flipped yet is always worth a press. "
              "`use_now` null = this USE would hit nothing (a wall, or the door is to the "
              "side): turn toward door_ahead.bearing first. Without `use_now` in the state: "
              "USE reaches about 64 units, so it is right when door_ahead is very close "
              "(dist <= 60) and roughly centred (|bearing| <= 20). Again when door_ahead is "
              "still there with tics_since_press >= 50 (the press did not take); never while "
              "tics_since_press < 50 (it would send the rising door back down), never "
-             "on a `wont_open` door or one with usable: false."),
+             "on a `wont_open` door."),
     "wait": dict(
         action={}, tics=8,
         desc="Stand still for a moment (FIRE still works while waiting). Best when "
@@ -331,9 +332,11 @@ STATE_LEGEND = (
     "a ramp up, and it IS walkable (just walk forward, the marine climbs steps by "
     "itself); a step too high to climb is reported as a wall. A sector's `hurt_dist` / "
     "`view.ahead_hurt_dist` = a damaging floor (nukage, slime, lava) begins that far that "
-    "way: walking onto it costs health every second - do not walk onto it unless it is "
-    "the only way on and player.radsuit_secs is present (radiation suit) or the hurting "
-    "stretch is short and health is high. `floor` (present only while you STAND on a "
+    "way: standing on it costs about 5 (nukage) to 20 (lava) health every second. It "
+    "is NOT a wall: rooms with nukage are normal and often the way on. Cross a short "
+    "stretch (a few steps) when that is the way to new ground or the exit, keep moving "
+    "while on it, prefer a dry walkway when there is one; avoid long walks in it unless "
+    "health is high or you have a radiation suit (player.radsuit_secs). `floor` (present only while you STAND on a "
     "damaging floor) = {hurts: damage per second, radsuit, way_off}: get off it NOW by "
     "the shortest way - turn toward `floor.way_off.bearing` and walk forward; if way_off "
     "is null no safe floor is in view: turn (big turns, same direction) until it shows. "
@@ -347,10 +350,9 @@ STATE_LEGEND = (
     "the MIDDLE of the door (bearing can be beyond +/-45 when you only see its edge: "
     "turn toward it). USE reaches only ~64 units straight ahead: walk up to it, face "
     "its middle, press `use`, then wait; it re-appears if the door re-closed. "
-    "`door_ahead.usable` = false: USE cannot open it (a window, a door a switch "
-    "opens, a lift you walk onto): do not press, look for a switch or another way. "
-    "`use_now` (when present) = what a USE pressed now would activate: `door`, "
-    "`lift`, `switch`, `exit` (the level exit: press it), or null = nothing. "
+    "`use_now` (when present) = what is under your crosshair within USE reach: "
+    "`door`, `lift`, `switch`, or null = nothing (a wall first, or the door is beside "
+    "you). "
     "`use_locked` = that door needs a key you do not have. `door_ahead.presses` / "
     "`tics_since_press` (present once you pressed USE on this door; 35 tics = 1 s): a "
     "door that opens is gone from door_ahead ~28 tics after the press, so with "
@@ -397,6 +399,16 @@ STATE_LEGEND = (
     "turn you just made (any left turn right after a right turn, or vice versa, while "
     "standing still): that is replaced by a curving walk (forward_left / "
     "forward_right) or by more turning the same way. "
+    "Exploring: you remember where you have walked. `view.sectors[].new` = share of "
+    "the ground that way (up to ~640 units) you have NOT walked yet (1 = all new, 0 = "
+    "already covered). `explore` {bearing, dist, new, in_view} = the best direction "
+    "into ground you have not walked yet (in_view false = it is behind you: turn to "
+    "it). With no enemy to fight and no door to open, go toward `explore` rather than "
+    "back over covered ground, and prefer openings / sectors with a high `new`. "
+    "`exit_sign` {bearing, dist} = a wall with EXIT written on it in view (an exit "
+    "sign, door or switch); `exit_seen` = where you saw one before, from here. That is "
+    "the way out of the level: once seen, head there (it beats `explore`), open the "
+    "door under or near it and press the switch you find there. "
     "`heading` is a compass heading, 0 = north, 90 = east. "
     "`commander` (when present) is the strategic layer's current intent: "
     "`turn_hint` says which way to turn to get on the requested heading. It is a "
@@ -409,7 +421,18 @@ STATE_LEGEND = (
 
 
 MAP_LEGEND = ("north up, '#' = wall (or closed door / ledge too high), ':' = walkable step "
-              "edge (stairs), '~' = edge of a damaging floor, '@' = you, ' ' = unknown/open")
+              "edge (stairs), '~' = edge of a damaging floor, 'E' = a wall with EXIT on it "
+              "that you saw, '.' = ground you have already walked, '@' = you, "
+              "' ' = not walked yet (unknown, or open floor you only saw)")
+
+# Visited ground: what the marine remembers of where it has been (a player does;
+# the automap only draws walls, so walked floor and never-seen floor are both ' ').
+VISIT_CELL = 64          # memory grid, map units per cell
+VISIT_RADIUS = 1         # mark the 3x3 cells around the marine (a ~190-unit swath)
+NOVELTY_FROM = 128       # look past the marine's own swath...
+NOVELTY_RANGE = 640      # ...up to this far along a direction, for ground not walked yet
+NOVELTY_STEP = 32
+EXPLORE_MIN_SCORE = 96   # new share x depth below this: nothing worth calling new
 
 
 def summarize_walls(walls):
@@ -536,6 +559,107 @@ class Memory:
         # direction, best_seen / way_out pointed right back at it, and Jev walked into
         # the same invisible obstacle forever (turn away, turn back, forward, BLOCKED).
         self.walk_blocks = []     # {"x","y","heading","level","step"}
+        # Visited ground per level (VISIT_CELL cells walked over) and where an EXIT sign
+        # was seen. Without them neither Jev nor the supervisor could tell new ground from
+        # ground already covered: 75% of the steps of a 29-minute E1M1 run went back over
+        # old ground, and the supervisor changed heading 173 times.
+        self.visited = {}         # (episode, map) -> set of (cx, cy): the walked swath
+        self.trail = {}           # (episode, map) -> set of (cx, cy): the path itself (for the map)
+        self.last_visit = None    # (level, x, y) of the last marked position
+        self.exit_seen = None     # {"x","y","level"}: the last EXIT sign seen
+
+    def note_visit(self, obs):
+        """Mark the ground around the marine (and along the way from the last mark)."""
+        if not obs.get("valid"):
+            return
+        lvl = (obs.get("episode"), obs.get("map"))
+        cells = self.visited.setdefault(lvl, set())
+        trail = self.trail.setdefault(lvl, set())
+        x, y = obs["x"], obs["y"]
+        pts = [(x, y)]
+        if self.last_visit and self.last_visit[0] == lvl:
+            lx, ly = self.last_visit[1], self.last_visit[2]
+            d = math.hypot(x - lx, y - ly)
+            if d < 400:                              # not a teleport / respawn
+                n = int(d // VISIT_CELL)
+                pts += [(lx + (x - lx) * k / (n + 1), ly + (y - ly) * k / (n + 1)) for k in range(1, n + 1)]
+        for px, py in pts:
+            cx, cy = int(px // VISIT_CELL), int(py // VISIT_CELL)
+            trail.add((cx, cy))
+            for dx in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+                for dy in range(-VISIT_RADIUS, VISIT_RADIUS + 1):
+                    cells.add((cx + dx, cy + dy))
+        self.last_visit = (lvl, x, y)
+        e = obs.get("exit_sign")
+        if e:
+            a = math.radians(obs["angle"] + e["bearing"])
+            self.exit_seen = {"x": x + e["dist"] * math.sin(a), "y": y + e["dist"] * math.cos(a), "level": lvl}
+
+    def novelty(self, obs, bearing, depth):
+        """Share of the ground along `bearing` (from NOVELTY_FROM to the wall, at most
+        NOVELTY_RANGE) that the marine has not walked yet: 1 = all new, 0 = all covered."""
+        reach = min(depth - 16, NOVELTY_RANGE)
+        if reach < NOVELTY_FROM:
+            return 0.0
+        cells = self.visited.get((obs.get("episode"), obs.get("map")), set())
+        a = math.radians(obs["angle"] + bearing)       # compass: x east = sin, y north = cos
+        sx, sy = math.sin(a), math.cos(a)
+        n = new = 0
+        d = NOVELTY_FROM
+        while d <= reach:
+            n += 1
+            new += (int((obs["x"] + d * sx) // VISIT_CELL), int((obs["y"] + d * sy) // VISIT_CELL)) not in cells
+            d += NOVELTY_STEP
+        return new / n if n else 0.0
+
+    def explore(self, obs):
+        """The best direction into ground not walked yet: over the rays in view and the
+        panorama of directions looked at from about here (which may be behind)."""
+        best = None
+        for w in obs.get("walls", []):
+            nov = self.novelty(obs, w["bearing"], w["dist"])
+            score = nov * min(w["dist"], NOVELTY_RANGE)
+            if best is None or score > best[0]:
+                best = (score, w["bearing"], w["dist"], nov, True)
+        for b, depth in self.pano.items():
+            rel = round(heading_error(obs["angle"], b * PANO_BIN + PANO_BIN / 2))
+            if abs(rel) <= 45:
+                continue                           # in view: the rays above cover it
+            nov = self.novelty(obs, rel, depth)
+            score = nov * min(depth, NOVELTY_RANGE)
+            if best is None or score > best[0] * 1.3:   # turning round has a cost
+                best = (score, rel, depth, nov, False)
+        if best is None or best[0] < EXPLORE_MIN_SCORE:
+            return None
+        return {"bearing": best[1], "dist": best[2], "new": round(best[3], 1), "in_view": best[4]}
+
+    def exit_from_here(self, obs):
+        """Where the remembered EXIT sign is, from the marine now (None if not on this level)."""
+        e = self.exit_seen
+        if not e or e["level"] != (obs.get("episode"), obs.get("map")) or not obs.get("valid"):
+            return None
+        return {"bearing": round(bearing_to(obs, e["x"], e["y"])),
+                "dist": round(math.hypot(e["x"] - obs["x"], e["y"] - obs["y"]))}
+
+    def map_with_visits(self, map_json, obs):
+        """The automap with the path walked marked '.' on empty cells (the path itself,
+        not the wider swath used for novelty, which would leak through walls)."""
+        if not map_json or not map_json.get("valid") or not obs.get("valid"):
+            return map_json
+        cells = self.trail.get((obs.get("episode"), obs.get("map")))
+        if not cells:
+            return map_json
+        upc = map_json["units_per_cell"]
+        ox, oy = map_json["origin_x"], map_json["origin_y"]
+        grid = [list(r) for r in map_json["grid"]]
+        for cx, cy in cells:
+            col = int((cx * VISIT_CELL + VISIT_CELL / 2 - ox) // upc)
+            row = int((oy - (cy * VISIT_CELL + VISIT_CELL / 2)) // upc)
+            if 0 <= row < len(grid) and 0 <= col < len(grid[row]) and grid[row][col] == " ":
+                grid[row][col] = "."
+        out = dict(map_json)
+        out["grid"] = ["".join(r) for r in grid]
+        return out
 
     def note_walk_block(self, macro, obs):
         """Remember the heading of a forward move that went nowhere."""
@@ -616,6 +740,7 @@ class Memory:
         self.note_walk_block(macro, obs)
         self.mask_walk_blocks(obs)
         self.note_view(obs)
+        self.note_visit(obs)
         if obs.get("valid"):
             now = time.time()
             self.positions.append((now, obs["x"], obs["y"], obs["health"]))
@@ -894,7 +1019,8 @@ class DryJev:
             elif abs(e["bearing"]) > AIM_CONE:
                 choice = "turn_left_small" if e["bearing"] < 0 else "turn_right_small"
             elif e["dist"] < 120:
-                choice = "back"          # centred but in melee range: back off, keep firing
+                # centred but in melee range: back off, keep firing (hold if backed into a wall)
+                choice = "wait" if blocked and recent and recent[-1] == "back" else "back"
             elif e["dist"] <= AIM_HOLD_DIST:
                 choice = "wait"          # centred and in range: hold and fire (a turn overshoots)
             else:
@@ -932,8 +1058,24 @@ class DryJev:
                 choice = "turn_left_small" if b < 0 else "turn_right_small"
             else:
                 choice = "turn_left" if b < 0 else "turn_right"
+        elif (state.get("exit_sign") or state.get("exit_seen")) and \
+                abs((state.get("exit_sign") or state.get("exit_seen"))["bearing"]) > 10:
+            # an EXIT sign seen: steer toward it (straight ahead falls through to walking)
+            b = (state.get("exit_sign") or state.get("exit_seen"))["bearing"]
+            if abs(b) > 25 or ahead < 120 or blocked:
+                choice = "turn_left" if b < 0 else "turn_right"
+            else:
+                choice = "forward_left" if b < 0 else "forward_right"
         elif hint in ("left", "right") and ahead < 400:
             choice = "turn_" + hint
+        elif hint not in ("left", "right") and state.get("explore") and \
+                abs(state["explore"]["bearing"]) > 15 and not (state.get("exit_sign") or state.get("exit_seen")):
+            # nothing else to do: head into ground not walked yet
+            b = state["explore"]["bearing"]
+            if abs(b) > 30 or ahead < 120 or blocked:
+                choice = "turn_left" if b < 0 else "turn_right"
+            else:
+                choice = "forward_left" if b < 0 else "forward_right"
         elif ahead >= 600 and not blocked:
             choice = "forward_long"
         elif ahead >= 120 and not blocked:
@@ -1206,6 +1348,11 @@ def view_of(obs, sectors, openings, ahead, mem, rays_mode):
 
 def build_state(obs, mem, intent, map_win, rays_mode="auto"):
     sectors, openings, ahead = summarize_walls(obs.get("walls", []))
+    for s, (_, lo, hi) in zip(sectors, SECTORS):
+        rays = [w for w in obs.get("walls", []) if lo <= w["bearing"] <= hi]
+        if rays:
+            deep = max(rays, key=lambda w: w["dist"])
+            s["new"] = round(mem.novelty(obs, deep["bearing"], deep["dist"]), 1)
     visible = obs.get("visible", [])
     enemies = [{"name": e["name"], "dist": e["dist"], "bearing": e["bearing"]}
                for e in hostiles(visible)]
@@ -1263,6 +1410,15 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
     }
     if best:
         state["best_seen"] = best
+    ex = mem.explore(obs)
+    if ex:
+        state["explore"] = ex
+    if obs.get("exit_sign"):
+        state["exit_sign"] = obs["exit_sign"]
+    else:
+        seen = mem.exit_from_here(obs)
+        if seen:
+            state["exit_seen"] = seen
     fl = floor_of(obs)
     if fl:
         state["floor"] = fl
@@ -1451,8 +1607,19 @@ SUPERVISOR_SYSTEM = (
     "reflexes to shoot barrels or walk into them, only to go around them. "
     "Map glyphs: '#' = wall (also a closed door or a ledge too high to climb), ':' = a "
     "step edge the marine CAN walk over (rows of ':' = stairs: a way up, not a wall), "
-    "'~' = the edge of a damaging floor (nukage/slime pool: avoid crossing it without a "
-    "radiation suit), '@' = the marine, ' ' = unexplored or open floor. "
+    "'~' = the edge of a damaging floor (nukage/slime: about 5-10 health per second "
+    "while standing on it, lava 20). It is NOT a wall: rooms with nukage are normal and "
+    "usually on the way to the exit; the marine may cross short stretches when that is "
+    "the way to new ground (prefer a dry walkway), it just must not linger or fight in "
+    "it. Never make avoiding nukage the goal or a reason to turn back; after taking "
+    "damage, finish the fight or step out, then resume exploring. "
+    "'E' = a wall with EXIT written on it that the marine has seen "
+    "(the level exit is there: once one is on the map, send the marine to it), "
+    "'.' = ground the marine has already walked, '@' = the marine, ' ' = not walked "
+    "yet (unexplored, or open floor only seen from afar). Explore toward ' ' areas "
+    "reachable through openings; do not send the marine back over '.' ground unless "
+    "it is the only way to unexplored space or to an 'E'. Keep a heading while it "
+    "still leads to new ground: changing it every plan makes the marine wander. "
     "Respond with ONLY a JSON object, no prose, with keys: "
     "goal (string, <= 160 chars, imperative, what the reflexes should do now, e.g. "
     "'Head east along the corridor, open the door at its end, then clear the room'), "
@@ -1584,6 +1751,16 @@ class Supervisor(threading.Thread):
             "Openings in view: " + (", ".join(f"bearing {o['bearing']} dist {o['dist']}" for o in openings) or "none") + ".",
             "Enemies in view: " + (", ".join(f"{e['name']} dist {e['dist']} bearing {e['bearing']}"
                                             for e in obs.get("visible", [])) or "none") + ".",
+            "Exit sign: " + (f"in view at bearing {obs['exit_sign']['bearing']} dist {obs['exit_sign']['dist']}"
+                             if obs.get("exit_sign") else
+                             (f"seen earlier, now at bearing {mem['exit_seen']['bearing']} dist "
+                              f"{mem['exit_seen']['dist']} from the marine" if mem.get("exit_seen") else
+                              "not seen yet")) + ".",
+            "Best direction into ground not walked yet: " + (
+                f"bearing {mem['explore']['bearing']} dist {mem['explore']['dist']} "
+                f"(new share {mem['explore']['new']}, {'in view' if mem['explore']['in_view'] else 'behind'})"
+                if mem.get("explore") else "none nearby (all covered: pick a ' ' area on the map)") +
+            f"; ground walked so far: {mem.get('walked_cells', 0)} cells of {VISIT_CELL} units.",
             f"Door ahead: {obs.get('door_ahead') or 'none'}. Blocked last move: {obs.get('blocked')}, "
             f"consecutive blocked: {mem['consecutive_blocked']}, blocked in the last 20 steps: {mem['blocked_recent']}.",
             f"Recent macros: {mem['recent']}.",
@@ -1656,6 +1833,13 @@ class Supervisor(threading.Thread):
         """No LLM: point the reflexes toward the least-explored direction on the
         automap (the compass ray that runs farthest through unknown cells)."""
         m = snap["map"]
+        ex = snap["mem"].get("exit_seen")
+        if ex:
+            # an EXIT sign was seen: that is where the level ends
+            heading = round((snap["obs"]["angle"] + ex["bearing"]) % 360)
+            return Intent(f"Go to the EXIT sign seen {compass_name(heading)} (heading {heading}, "
+                          f"{ex['dist']} units): open the door there and press the switch.",
+                          heading, "normal", None, "exit sign seen", "dry")
         if not m or not m.get("valid"):
             return Intent(DEFAULT_INTENT.goal, None, "normal", None, "no map yet", "dry")
         grid = m["grid"]
@@ -1675,9 +1859,9 @@ class Supervisor(threading.Thread):
                     score += 6      # unknown territory beyond the revealed extent
                     break
                 ch = grid[ri][ci]
-                if ch == "#":
+                if ch in "#E":
                     break
-                score += 1
+                score += 0.25 if ch == "." else 1      # ground already walked counts little
             if score > best_score:
                 best, best_score = heading, score
         goal = (f"Explore: travel roughly {compass_name(best)} (heading {best}) toward unexplored space; "
@@ -1743,8 +1927,11 @@ class SharedState:
     def publish(self, obs, mem, map_json):
         snap = {
             "obs": obs,
-            "map": map_json,
+            "map": mem.map_with_visits(map_json, obs),
             "mem": {
+                "exit_seen": mem.exit_from_here(obs),
+                "explore": mem.explore(obs) if obs.get("valid") else None,
+                "walked_cells": len(mem.visited.get((obs.get("episode"), obs.get("map")), ())),
                 "consecutive_blocked": mem.consecutive_blocked,
                 "blocked_recent": sum(mem.blocked_window),
                 "recent": list(mem.recent),
@@ -2158,7 +2345,7 @@ def run(args):
                     macro = system_macro
                 else:
                     # ---- decide (Jev) ------------------------------------------------
-                    map_win = map_window(map_json) if map_json else None
+                    map_win = map_window(mem.map_with_visits(map_json, obs)) if map_json else None
                     state = build_state(obs, mem, intent, map_win, args.view_rays)
                     questions = build_questions(intent)
                     t0 = time.perf_counter()
@@ -2303,7 +2490,7 @@ def run(args):
                     #   On the board the marine stood in the corner next to a door, pressed
                     #   twice into the wall ("oof") and gave the door up.
                     elif mech and macro == "use" and door and "use_target" in obs and \
-                            obs["use_target"] is None and door.get("usable", True) and \
+                            obs["use_target"] is None and \
                             not is_dead_door(obs, mem):
                         b = door["bearing"]
                         if abs(b) > 25:
