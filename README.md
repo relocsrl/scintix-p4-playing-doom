@@ -177,7 +177,10 @@ boards). To attach an external **ES8311** audio module, e.g. the
 wires short and share a ground close to them.
 
 The ES8311 (`0x18`) and the EchoBase PI4IOE5V6408 I/O expander (`0x43`) share that I²C
-bus; **no external MCLK** is required (the codec clocks off SCLK). For reference, the
+bus; **no external MCLK** is required (the codec clocks off SCLK). If the module
+resets while the game runs (a dip on its 3.3 V, a loose wire), the firmware notices
+within 2 s and sets it up again (`Audio module reset detected` in the serial log)
+instead of staying silent until a reboot. For reference, the
 display signals are routed the same way: backlight P4 `GPIO3` → RPi `GPIO27`, reset P4
 `GPIO4` → RPi `GPIO22`.
 
@@ -200,7 +203,7 @@ Each release ships ready-to-flash images in [`binaries/`](binaries/)
 esptool commands. With Python and esptool 5.x (`pip install "esptool>=5"`):
 
 ```bat
-binaries\scintix-p4-doom-v0.6.1\flash.bat COM5
+binaries\scintix-p4-doom-v0.6.2\flash.bat COM5
 ```
 
 `flash.bat COM5 app` updates the firmware only (keeps the WAD, Wi-Fi and settings);

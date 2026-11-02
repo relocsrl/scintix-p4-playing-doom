@@ -12,6 +12,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
 
@@ -48,6 +49,16 @@
 #define ECHOBASE_IOEXP_REG_IO_DIR 0x03
 #define ECHOBASE_IOEXP_REG_IO_OUT 0x05
 #define ECHOBASE_IOEXP_REG_IO_PULLUP 0x0D
+#define ECHOBASE_IOEXP_DIR_VALUE 0x6F
+
+/* Health check: the codec and the expander are configured once; if the EchoBase
+ * resets (power dip on its 3.3 V, a loose wire) they come back muted and the
+ * game goes silent until a reboot. Every AUDIO_HEALTH_PERIOD_MS read back one
+ * register of each and re-initialize what lost its setup. */
+#define AUDIO_HEALTH_PERIOD_MS 2000
+#define ES8311_I2C_ADDR_7BIT (JC_AUDIO_ES8311_ADDR >> 1) /* esp_codec_dev takes the 8-bit form */
+#define ES8311_REG00 0x00
+#define ES8311_REG00_CSM_ON 0x80 /* set by the driver once configured; 0x1F after a reset */
 #define JC_AUDIO_NVS_NAMESPACE "doom_audio"
 #define JC_AUDIO_NVS_VOLUME_KEY "volume"
 
@@ -82,6 +93,17 @@ static const snddevice_t s_sound_devices[] = {
 
 static i2s_chan_handle_t s_i2s_tx;
 static esp_codec_dev_handle_t s_codec;
+static i2c_master_bus_handle_t s_i2c_bus;
+static const audio_codec_ctrl_if_t *s_codec_ctrl_if;
+static const audio_codec_data_if_t *s_codec_data_if;
+static const audio_codec_gpio_if_t *s_codec_gpio_if;
+static const audio_codec_if_t *s_codec_if;
+static i2c_master_dev_handle_t s_codec_reg_dev; /* raw register reads for the health check */
+static i2c_master_dev_handle_t s_ioexp_dev;
+static bool s_has_ioexp;                        /* the expander answered at boot (EchoBase) */
+static SemaphoreHandle_t s_codec_mutex;         /* s_codec vs. the web page's volume setter */
+static volatile bool s_audio_hold;              /* health task: pause the mixer */
+static volatile bool s_audio_held;              /* mixer: paused */
 static TaskHandle_t s_audio_task;
 static portMUX_TYPE s_audio_lock = portMUX_INITIALIZER_UNLOCKED;
 static audio_channel_t s_channels[DOOM_AUDIO_CHANNELS];
@@ -111,8 +133,13 @@ void doom_audio_set_volume(uint8_t volume)
     s_audio_volume = volume;
     portEXIT_CRITICAL(&s_audio_lock);
 
-    if (s_codec != NULL) {
-        esp_codec_dev_set_out_vol(s_codec, volume);
+    /* The health task may be re-creating the codec; it applies the stored
+     * volume itself when it reopens it. */
+    if (s_codec_mutex != NULL && xSemaphoreTake(s_codec_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        if (s_codec != NULL) {
+            esp_codec_dev_set_out_vol(s_codec, volume);
+        }
+        xSemaphoreGive(s_codec_mutex);
     }
 }
 
@@ -223,28 +250,30 @@ static esp_err_t init_i2s(void)
 /* The EchoBase speaker amp is muted/enabled through a PI4IOE5V6408 I/O expander
  * (I2C 0x43) on the same bus as the codec. Without this the output is silent.
  * Mirrors the M5 init: configure the pins as outputs and drive them high. */
-static esp_err_t echobase_unmute(i2c_master_bus_handle_t bus)
+static esp_err_t echobase_unmute(void)
 {
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = ECHOBASE_IOEXP_ADDR,
-        .scl_speed_hz = 100000,
-    };
-    i2c_master_dev_handle_t dev = NULL;
-    esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "EchoBase I/O expander add failed: %s", esp_err_to_name(err));
-        return err;
+    esp_err_t err;
+    if (s_ioexp_dev == NULL) {
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = ECHOBASE_IOEXP_ADDR,
+            .scl_speed_hz = 100000,
+        };
+        err = i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_ioexp_dev);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "EchoBase I/O expander add failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
     const uint8_t seq[][2] = {
         {ECHOBASE_IOEXP_REG_IO_PP, 0x00},      /* push-pull / high-Z config */
         {ECHOBASE_IOEXP_REG_IO_PULLUP, 0xFF},  /* enable pull-ups */
-        {ECHOBASE_IOEXP_REG_IO_DIR, 0x6F},     /* pin directions */
+        {ECHOBASE_IOEXP_REG_IO_DIR, ECHOBASE_IOEXP_DIR_VALUE}, /* pin directions */
         {ECHOBASE_IOEXP_REG_IO_OUT, 0xFF},     /* outputs high -> unmute / amp on */
     };
     for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
-        err = i2c_master_transmit(dev, seq[i], sizeof(seq[i]), 100);
+        err = i2c_master_transmit(s_ioexp_dev, seq[i], sizeof(seq[i]), 100);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "EchoBase expander reg 0x%02x write failed: %s", seq[i][0], esp_err_to_name(err));
         }
@@ -253,41 +282,13 @@ static esp_err_t echobase_unmute(i2c_master_bus_handle_t bus)
     return ESP_OK;
 }
 
-static esp_err_t init_codec(void)
+/* Create the ES8311 driver and open the codec: the full register setup, so it
+ * also brings a codec back after it was reset. */
+static esp_err_t codec_open(void)
 {
-    i2c_master_bus_handle_t i2c_bus = NULL;
-    i2c_master_bus_config_t i2c_cfg = {
-        .i2c_port = JC_AUDIO_I2C_PORT,
-        .sda_io_num = JC_AUDIO_I2C_SDA,
-        .scl_io_num = JC_AUDIO_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &i2c_bus), TAG, "I2C init failed");
-
-    audio_codec_i2c_cfg_t codec_i2c_cfg = {
-        .port = JC_AUDIO_I2C_PORT,
-        .addr = JC_AUDIO_ES8311_ADDR,
-        .bus_handle = i2c_bus,
-    };
-    const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&codec_i2c_cfg);
-    ESP_RETURN_ON_FALSE(ctrl_if != NULL, ESP_FAIL, TAG, "codec I2C control init failed");
-
-    audio_codec_i2s_cfg_t codec_i2s_cfg = {
-        .port = JC_AUDIO_I2S_PORT,
-        .tx_handle = s_i2s_tx,
-        .rx_handle = NULL,
-    };
-    const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&codec_i2s_cfg);
-    ESP_RETURN_ON_FALSE(data_if != NULL, ESP_FAIL, TAG, "codec I2S data init failed");
-
-    const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
-    ESP_RETURN_ON_FALSE(gpio_if != NULL, ESP_FAIL, TAG, "codec GPIO init failed");
-
     es8311_codec_cfg_t es8311_cfg = {
-        .ctrl_if = ctrl_if,
-        .gpio_if = gpio_if,
+        .ctrl_if = s_codec_ctrl_if,
+        .gpio_if = s_codec_gpio_if,
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
         .master_mode = false,
         .use_mclk = false,          /* EchoBase: clock from SCLK, no external MCLK */
@@ -299,13 +300,13 @@ static esp_err_t init_codec(void)
         },
         .mclk_div = JC_AUDIO_MCLK_MULTIPLE,
     };
-    const audio_codec_if_t *codec_if = es8311_codec_new(&es8311_cfg);
-    ESP_RETURN_ON_FALSE(codec_if != NULL, ESP_FAIL, TAG, "ES8311 init failed");
+    s_codec_if = es8311_codec_new(&es8311_cfg);
+    ESP_RETURN_ON_FALSE(s_codec_if != NULL, ESP_FAIL, TAG, "ES8311 init failed");
 
     esp_codec_dev_cfg_t dev_cfg = {
         .dev_type = ESP_CODEC_DEV_TYPE_OUT,
-        .codec_if = codec_if,
-        .data_if = data_if,
+        .codec_if = s_codec_if,
+        .data_if = s_codec_data_if,
     };
     s_codec = esp_codec_dev_new(&dev_cfg);
     ESP_RETURN_ON_FALSE(s_codec != NULL, ESP_FAIL, TAG, "codec device init failed");
@@ -320,10 +321,133 @@ static esp_err_t init_codec(void)
                         ESP_FAIL, TAG, "codec open failed");
     ESP_RETURN_ON_FALSE(esp_codec_dev_set_out_vol(s_codec, doom_audio_get_volume()) == ESP_CODEC_DEV_OK,
                         ESP_FAIL, TAG, "codec volume failed");
+    return ESP_OK;
+}
+
+/* Undo codec_open (also disables the I2S channel: pause the mixer first). */
+static void codec_close(void)
+{
+    if (s_codec != NULL) {
+        esp_codec_dev_delete(s_codec); /* closes it */
+        s_codec = NULL;
+    }
+    if (s_codec_if != NULL) {
+        audio_codec_delete_codec_if(s_codec_if);
+        s_codec_if = NULL;
+    }
+}
+
+static esp_err_t init_codec(void)
+{
+    i2c_master_bus_config_t i2c_cfg = {
+        .i2c_port = JC_AUDIO_I2C_PORT,
+        .sda_io_num = JC_AUDIO_I2C_SDA,
+        .scl_io_num = JC_AUDIO_I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&i2c_cfg, &s_i2c_bus), TAG, "I2C init failed");
+
+    audio_codec_i2c_cfg_t codec_i2c_cfg = {
+        .port = JC_AUDIO_I2C_PORT,
+        .addr = JC_AUDIO_ES8311_ADDR,
+        .bus_handle = s_i2c_bus,
+    };
+    s_codec_ctrl_if = audio_codec_new_i2c_ctrl(&codec_i2c_cfg);
+    ESP_RETURN_ON_FALSE(s_codec_ctrl_if != NULL, ESP_FAIL, TAG, "codec I2C control init failed");
+
+    audio_codec_i2s_cfg_t codec_i2s_cfg = {
+        .port = JC_AUDIO_I2S_PORT,
+        .tx_handle = s_i2s_tx,
+        .rx_handle = NULL,
+    };
+    s_codec_data_if = audio_codec_new_i2s_data(&codec_i2s_cfg);
+    ESP_RETURN_ON_FALSE(s_codec_data_if != NULL, ESP_FAIL, TAG, "codec I2S data init failed");
+
+    s_codec_gpio_if = audio_codec_new_gpio();
+    ESP_RETURN_ON_FALSE(s_codec_gpio_if != NULL, ESP_FAIL, TAG, "codec GPIO init failed");
+
+    ESP_RETURN_ON_ERROR(codec_open(), TAG, "codec open failed");
+
+    /* A second handle on the codec address for plain register reads (the health
+     * check), so a missing EchoBase does not flood the log through esp_codec_dev. */
+    i2c_device_config_t reg_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = ES8311_I2C_ADDR_7BIT,
+        .scl_speed_hz = 100000,
+    };
+    if (i2c_master_bus_add_device(s_i2c_bus, &reg_cfg, &s_codec_reg_dev) != ESP_OK) {
+        s_codec_reg_dev = NULL;
+    }
 
     /* Unmute the EchoBase speaker amp via its I/O expander (same I2C bus). */
-    echobase_unmute(i2c_bus);
+    s_has_ioexp = i2c_master_probe(s_i2c_bus, ECHOBASE_IOEXP_ADDR, 50) == ESP_OK;
+    echobase_unmute();
     return ESP_OK;
+}
+
+static bool read_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *val)
+{
+    return dev != NULL && i2c_master_transmit_receive(dev, &reg, 1, val, 1, 50) == ESP_OK;
+}
+
+/* Re-create and re-open a codec that lost its setup. Closing it disables the
+ * I2S channel, so the mixer is paused around it; if reopening fails the mixer
+ * stays paused (writing to a disabled channel would spin) until a later try. */
+static bool codec_recover(void)
+{
+    s_audio_hold = true;
+    for (int i = 0; i < 40 && !s_audio_held; i++) { /* a write in flight ends within ~65 ms */
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    xSemaphoreTake(s_codec_mutex, portMAX_DELAY);
+    codec_close();
+    esp_err_t err = codec_open();
+    xSemaphoreGive(s_codec_mutex);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Codec re-init failed: %s (retrying)", esp_err_to_name(err));
+        return false;
+    }
+    s_audio_hold = false;
+    return true;
+}
+
+static void audio_health_task(void *arg)
+{
+    (void)arg;
+    bool absent = false;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(AUDIO_HEALTH_PERIOD_MS));
+        if (i2c_master_probe(s_i2c_bus, ES8311_I2C_ADDR_7BIT, 50) != ESP_OK ||
+            (s_has_ioexp && i2c_master_probe(s_i2c_bus, ECHOBASE_IOEXP_ADDR, 50) != ESP_OK)) {
+            if (!absent) {
+                ESP_LOGW(TAG, "Audio module not answering on I2C (unplugged / no power?); "
+                              "it will be set up again when it is back");
+                absent = true;
+            }
+            continue;
+        }
+        uint8_t reg00 = 0;
+        bool codec_lost = !read_reg(s_codec_reg_dev, ES8311_REG00, &reg00) || !(reg00 & ES8311_REG00_CSM_ON);
+        bool ioexp_lost = false;
+        if (s_has_ioexp) {
+            uint8_t dir = 0;
+            ioexp_lost = !read_reg(s_ioexp_dev, ECHOBASE_IOEXP_REG_IO_DIR, &dir) || dir != ECHOBASE_IOEXP_DIR_VALUE;
+        }
+        if (absent || codec_lost || s_audio_hold) {
+            ESP_LOGW(TAG, "Audio module reset detected (ES8311 REG00=0x%02x%s): re-initializing",
+                     reg00, absent ? ", was not answering" : "");
+            if (codec_recover()) {
+                ESP_LOGI(TAG, "Audio module back");
+            }
+            ioexp_lost = s_has_ioexp;
+        }
+        if (ioexp_lost) {
+            echobase_unmute();
+        }
+        absent = false;
+    }
 }
 
 static cached_sfx_t *cache_sfx(sfxinfo_t *sfxinfo)
@@ -403,6 +527,13 @@ static void audio_task(void *arg)
     audio_channel_t snapshot[DOOM_AUDIO_CHANNELS];
 
     while (true) {
+        if (s_audio_hold) {
+            s_audio_held = true; /* the health task is re-initializing the codec */
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+        s_audio_held = false;
+
         portENTER_CRITICAL(&s_audio_lock);
         memcpy(snapshot, s_channels, sizeof(snapshot));
         portEXIT_CRITICAL(&s_audio_lock);
@@ -478,7 +609,8 @@ static boolean init_sound(boolean use_sfx_prefix)
     s_use_sfx_prefix = use_sfx_prefix;
     memset(s_channels, 0, sizeof(s_channels));
 
-    if (init_i2s() != ESP_OK || init_codec() != ESP_OK) {
+    s_codec_mutex = xSemaphoreCreateMutex();
+    if (s_codec_mutex == NULL || init_i2s() != ESP_OK || init_codec() != ESP_OK) {
         ESP_LOGE(TAG, "Audio init failed");
         return false;
     }
@@ -490,6 +622,10 @@ static boolean init_sound(boolean use_sfx_prefix)
     if (created != pdTRUE) {
         ESP_LOGE(TAG, "Audio task create failed");
         return false;
+    }
+    if (xTaskCreatePinnedToCore(audio_health_task, "audio_health", 4096, NULL,
+                                tskIDLE_PRIORITY + 1, NULL, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Audio health task create failed (no auto-recovery)");
     }
 
     s_sound_initialized = true;

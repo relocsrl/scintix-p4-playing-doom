@@ -249,6 +249,12 @@ configurations:
   turns only, walk only within +/-10): no-enemy stretch zig-zags forward ~760 units
   in 30 steps instead of turning in place; DryJev regressions unchanged (net never
   fires). **Not yet run with real Jev.**
+  Review fix (2026-11-02): a *small* counter-turn with a closed door / lift within
+  128 units (`door_ahead.dist`, `NO_UNDO_DOOR_DIST`) is exempt: it is lining up for
+  USE (64 units reach). Before, with the door closer than 64 units the net could not
+  walk and forced the previous turn again, swinging the marine all the way round
+  (~11 steps) instead of a few degrees. Big counter-turns near a door are still
+  caught.
 - **Game handling** (always on): death → wait 1 s, USE (level restarts); "frozen"
   game (8 steps with no change at all = intermission, or a menu) → USE/wait pulses,
   then "press Esc" hint; WebSocket/Wi-Fi loss → reconnect (10 attempts, backoff);

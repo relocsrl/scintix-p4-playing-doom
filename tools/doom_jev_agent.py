@@ -1309,6 +1309,7 @@ WALK_TOWARD = {m for m in MOVE_MACROS if MACROS[m]["action"].get("move") == "for
 TURN_SIDE = {"turn_left": "left", "turn_left_small": "left",      # turns in place (no move)
              "turn_right": "right", "turn_right_small": "right"}
 NO_UNDO_ROOM = 64      # clearance ahead to walk out of a turn-undo loop (the marine is 32 wide)
+NO_UNDO_DOOR_DIST = 128  # a closed door / lift this close: small counter-turns are aiming at it
 
 
 def is_oscillating(recent, n=4):
@@ -2195,9 +2196,15 @@ def run(args):
                     #   (R, l, L, r, ...) is the same loop. So: walk while curving the way
                     #   Jev wants if there is room ahead, else keep turning the way it was
                     #   already turning (a full look round in ~11 steps, no back-and-forth).
+                    #   Exception: a small counter-turn with a closed door / lift close ahead
+                    #   is lining up for USE (64 units reach); forcing a turn the other way
+                    #   there swings the marine all the way round (no room to walk).
                     prev = mem.recent[-1] if mem.recent else None
+                    door_near = (obs.get("door_ahead") or {}).get("dist", RAY_RANGE) <= NO_UNDO_DOOR_DIST
+                    lining_up = door_near and macro.endswith("_small")
                     if mech and macro in TURN_SIDE and prev in TURN_SIDE and TURN_SIDE[macro] != TURN_SIDE[prev] \
-                            and not hostiles(obs.get("visible", [])) and door_st not in ("working", "retry"):
+                            and not hostiles(obs.get("visible", [])) and door_st not in ("working", "retry") \
+                            and not lining_up:
                         hazards = [t for t in obs.get("visible", []) if t["name"] in NON_HOSTILE]
                         clear = obstacle_ahead(min((w["dist"] for w in obs.get("walls", []) if -6 <= w["bearing"] <= 6),
                                                    default=RAY_RANGE), hazards)
