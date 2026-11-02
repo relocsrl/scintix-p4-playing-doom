@@ -431,7 +431,7 @@ MAP_LEGEND = ("north up, '#' = wall (or closed door / ledge too high), ':' = wal
 # the automap only draws walls, so walked floor and never-seen floor are both ' ').
 VISIT_CELL = 64          # memory grid, map units per cell
 VISIT_RADIUS = 1         # mark the 3x3 cells around the marine (a ~190-unit swath)
-SEEN_RANGE = 384         # floor seen along each ray of the view, up to this far, is explored
+SEEN_RANGE = 1024        # floor seen along each ray of the view (up to the wall), up to this far
 NOVELTY_FROM = 128       # look past the marine's own swath...
 NOVELTY_RANGE = 1024     # ...up to this far along a direction, for ground not explored yet
 NOVELTY_STEP = 32
@@ -681,11 +681,17 @@ class Memory:
         upc = map_json["units_per_cell"]
         ox, oy = map_json["origin_x"], map_json["origin_y"]
         grid = [list(r) for r in map_json["grid"]]
-        for cx, cy in cells:
-            col = int((cx * VISIT_CELL + VISIT_CELL / 2 - ox) // upc)
-            row = int((oy - (cy * VISIT_CELL + VISIT_CELL / 2)) // upc)
-            if 0 <= row < len(grid) and 0 <= col < len(grid[row]) and grid[row][col] == " ":
-                grid[row][col] = "."
+        # per map cell (its centre in map units), not per memory cell: the map's cells
+        # are usually smaller than VISIT_CELL, and placing one '.' per memory cell left
+        # a dotted pattern whose blank gaps read as unexplored (the supervisor sent the
+        # marine back into the start room for that)
+        for row, line in enumerate(grid):
+            wy = oy - row * upc - upc / 2
+            for col, ch in enumerate(line):
+                if ch == " ":
+                    wx = ox + col * upc + upc / 2
+                    if (int(wx // VISIT_CELL), int(wy // VISIT_CELL)) in cells:
+                        line[col] = "."
         out = dict(map_json)
         out["grid"] = ["".join(r) for r in grid]
         return out
