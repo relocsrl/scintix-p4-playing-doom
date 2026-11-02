@@ -66,13 +66,20 @@ typedef struct {
     int  num_rays;
     doom_agent_ray_t walls[DOOM_AGENT_NUM_RAYS];
     /* An openable-but-currently-closed obstruction in view (a door / closed
-     * passage), distinct from a solid wall; bearing points at the door itself
-     * (most central ray), not its edge. Tells the agent to press use again when a
-     * door has re-shut. door_ahead_valid = false when none is in view. */
+     * passage), distinct from a solid wall; bearing and distance point at the
+     * middle of the door line (it can be outside the view when only its edge is
+     * seen). Tells the agent to press use again when a door has re-shut.
+     * door_ahead_valid = false when none is in view. */
     bool door_ahead_valid;
-    int  door_ahead_bearing; /* -45..45 relative to facing */
-    int  door_ahead_dist;    /* map units */
+    int  door_ahead_bearing; /* relative to facing, + = right; can exceed +/-45 */
+    int  door_ahead_dist;    /* map units to the middle of the door */
     bool door_ahead_lift;    /* it is a raised lift (USE lowers it, step on, it rises), not a door */
+    bool door_ahead_usable;  /* USE opens it (false: a window, a switch-operated door, a walk-over lift) */
+    /* What a USE pressed now would activate (the 64-unit trace along the facing
+     * that P_UseLines does): NULL = nothing (or a wall first: USE goes "oof"),
+     * else "door", "lift", "exit" or "switch". use_locked = a key door without the key. */
+    const char *use_target;
+    bool use_locked;
     /* The floor under the player: damage per hit (every 32 tics) of a nukage /
      * slime / lava floor, 0 = safe; radiation suit tics left (protects from it). */
     int  floor_damage;

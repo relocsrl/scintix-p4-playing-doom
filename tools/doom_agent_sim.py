@@ -457,20 +457,38 @@ class World:
             if t is not None and (best_t is None or t < best_t):
                 best_t, best_w = t, w
         if best_t is None or best_t > RAY_RANGE:
-            return RAY_RANGE, False
+            return RAY_RANGE, None
         best_w.mapped = True
-        return int(best_t), best_w.door
+        return int(best_t), best_w if best_w.door else None
+
+    def use_probe(self):
+        """What a USE pressed now would hit: the first line within USE_RANGE along the
+        facing (the same trace as the `use` key above and as P_UseLines)."""
+        a_rad = math.radians(self.doom_angle)
+        dx, dy = math.cos(a_rad), math.sin(a_rad)
+        best_t, best_w = None, None
+        for w in self.walls:
+            t = seg_intersect(self.px, self.py, dx, dy, w)
+            if t is not None and t <= USE_RANGE and (best_t is None or t < best_t):
+                best_t, best_w = t, w
+        return "door" if best_w is not None and best_w.door else None
 
     def observation(self, blocked=False):
         walls = []
-        door = None
+        door_wall, door_b = None, None
         mid = (NUM_RAYS - 1) // 2
         for i in range(NUM_RAYS):
             bearing = int((i - mid) * 2 * FOV / (NUM_RAYS - 1))   # C division truncates toward zero
-            dist, is_door = self.cast(bearing)
+            dist, hit_door = self.cast(bearing)
             walls.append({"bearing": bearing, "dist": dist})
-            if is_door and (door is None or abs(bearing) < abs(door["bearing"])):
-                door = {"bearing": bearing, "dist": dist}
+            if hit_door is not None and (door_b is None or abs(bearing) < abs(door_b)):
+                door_wall, door_b = hit_door, bearing
+        door = None
+        if door_wall is not None:
+            # like the firmware: bearing / dist to the middle of the door line
+            mx, my = (door_wall.x1 + door_wall.x2) / 2, (door_wall.y1 + door_wall.y2) / 2
+            door = {"bearing": int(round(self.bearing_to(mx, my))),
+                    "dist": int(math.hypot(mx - self.px, my - self.py)), "usable": True}
         visible = []
         for t in self.things:
             if not t.alive:
@@ -493,6 +511,7 @@ class World:
             "visible": visible[:16],
             "walls": walls,
             **({"door_ahead": door} if door else {}),
+            "use_target": self.use_probe(),
             "blocked": blocked,
         }
 

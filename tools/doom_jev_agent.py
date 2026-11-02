@@ -234,14 +234,16 @@ MACROS = {
     "use": dict(
         action={"use": True}, tics=3,
         desc="Press USE: opens the door in front, lowers a lift (door_ahead.kind "
-             "`lift`), flips a switch. USE only "
-             "reaches about 64 units, so it is right when door_ahead is very "
-             "close (dist <= 60) and roughly centred (|bearing| <= 20); if the door "
-             "is farther, walk up to it first. Again when door_ahead is still there "
-             "with tics_since_press >= 50 (the press did not take); never while "
+             "`lift`), flips a switch. When `use_now` is present (not null) it tells "
+             "exactly what a USE pressed NOW would activate (door / lift / switch / "
+             "exit): press `use` then - `use_now: exit` ends the level, always press it. "
+             "`use_now` null = this USE would hit nothing (a wall, or the door is to the "
+             "side): turn toward door_ahead.bearing first. Without `use_now` in the state: "
+             "USE reaches about 64 units, so it is right when door_ahead is very close "
+             "(dist <= 60) and roughly centred (|bearing| <= 20). Again when door_ahead is "
+             "still there with tics_since_press >= 50 (the press did not take); never while "
              "tics_since_press < 50 (it would send the rising door back down), never "
-             "on a `wont_open` door. Also try it when blocked straight ahead by a "
-             "flat wall very close (a hidden door or switch)."),
+             "on a `wont_open` door or one with usable: false."),
     "wait": dict(
         action={}, tics=8,
         desc="Stand still for a moment (FIRE still works while waiting). Best when "
@@ -341,9 +343,15 @@ STATE_LEGEND = (
     "distance}; use it to line up precisely on a narrow doorway or opening that the 7 "
     "sectors are too coarse to place. "
     "`view.openings` are rays much longer than their neighbours = a passage or "
-    "doorway. `door_ahead` is a closed door/passage in view (USE reaches only "
-    "~64 units: walk up to it, press `use` when dist <= 60 and roughly centred, "
-    "then wait; it re-appears if the door re-closed). `door_ahead.presses` / "
+    "doorway. `door_ahead` is a closed door/passage in view; its bearing/dist point at "
+    "the MIDDLE of the door (bearing can be beyond +/-45 when you only see its edge: "
+    "turn toward it). USE reaches only ~64 units straight ahead: walk up to it, face "
+    "its middle, press `use`, then wait; it re-appears if the door re-closed. "
+    "`door_ahead.usable` = false: USE cannot open it (a window, a door a switch "
+    "opens, a lift you walk onto): do not press, look for a switch or another way. "
+    "`use_now` (when present) = what a USE pressed now would activate: `door`, "
+    "`lift`, `switch`, `exit` (the level exit: press it), or null = nothing. "
+    "`use_locked` = that door needs a key you do not have. `door_ahead.presses` / "
     "`tics_since_press` (present once you pressed USE on this door; 35 tics = 1 s): a "
     "door that opens is gone from door_ahead ~28 tics after the press, so with "
     "tics_since_press < 50 it is still rising (wait, do not turn away, do not press "
@@ -1080,11 +1088,22 @@ def use_reaches(door, mem):
     return walking and door["dist"] <= DOOR_PRESS_DIST
 
 
+def use_hits_door(obs):
+    """Firmware with the USE probe (`use_target` present): would this press open
+    something? Doors that a press could not reach must not count as tried."""
+    return obs.get("use_target") in ("door", "lift") and not obs.get("use_locked")
+
+
 def note_door_attempt(obs, mem):
     """A USE was just pressed: if it was aimed at door_ahead from within reach, count it
     against that door (to press again, or give up, if the door stays shut)."""
     door = obs.get("door_ahead")
-    if not (use_reaches(door, mem) and abs(door["bearing"]) <= 25):
+    if "use_target" in obs:
+        # exact: the press hit the door (a key door without the key counts at once
+        # as tried, so it is given up instead of pressed forever)
+        if not door or not (use_hits_door(obs) or obs.get("use_locked")):
+            return
+    elif not (use_reaches(door, mem) and abs(door["bearing"]) <= 25):
         return
     p = door_world_pos(obs)
     if p is None:
@@ -1231,6 +1250,8 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
         "hazards_in_view": hazards,
         "door_ahead": door,
         "blocked_last_move": bool(obs.get("blocked")),
+        **({"use_now": obs["use_target"]} if "use_target" in obs else {}),
+        **({"use_locked": True} if obs.get("use_locked") else {}),
         "consecutive_blocked": mem.consecutive_blocked,
         "recent_actions": list(mem.recent),
         "same_action_streak": mem.same_streak,
@@ -1259,6 +1280,9 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
 # Policy: turn Jev's answers into one firmware action
 # ----------------------------------------------------------------------------
 
+SAMPLE_NEAR_TOP = 0.6   # `mixed` samples only among options >= 60% of Jev's top probability
+
+
 def pick_macro(answers, policy, min_conf, rng, allow_sample=True):
     a = answers["action"]
     probs = a.get("probabilities") or {}
@@ -1277,6 +1301,12 @@ def pick_macro(answers, policy, min_conf, rng, allow_sample=True):
         # never let a random draw pick turn_around: a 180 flip is a last resort, wrong
         # unless it is Jev's actual top choice; sampling into it is what spins the marine
         pool = {n: w for n, w in valid.items() if n != "turn_around" or choice == "turn_around"}
+        if policy == "mixed":
+            # a tie-break, not a lottery: only options close to Jev's best. Drawing from
+            # the whole flat distribution made 30% of the moves on the board random
+            # (a 0.10 strafe instead of a 0.30 turn) and the marine staggered about.
+            top = max(pool.values(), default=0.0)
+            pool = {n: w for n, w in pool.items() if w >= SAMPLE_NEAR_TOP * top}
         names = list(pool)
         weights = [max(pool[n], 0.0) for n in names]
         if sum(weights) > 0:
@@ -2268,6 +2298,22 @@ def run(args):
                             ("forward_left" if door["bearing"] < 0 else "forward_right")
                         mem.heuristic_overrides += 1
                         flags.append("approach-door")
+                    # - the USE probe says this press would hit nothing (a wall, or the door
+                    #   is beside the marine): turn to face the middle of the door instead.
+                    #   On the board the marine stood in the corner next to a door, pressed
+                    #   twice into the wall ("oof") and gave the door up.
+                    elif mech and macro == "use" and door and "use_target" in obs and \
+                            obs["use_target"] is None and door.get("usable", True) and \
+                            not is_dead_door(obs, mem):
+                        b = door["bearing"]
+                        if abs(b) > 25:
+                            macro = "turn_left" if b < 0 else "turn_right"
+                        elif abs(b) > 6:
+                            macro = "turn_left_small" if b < 0 else "turn_right_small"
+                        else:
+                            macro = "back"      # facing it, still not reaching: a corner in between
+                        mem.heuristic_overrides += 1
+                        flags.append("aim-door")
                     # - Doom's USE toggles doors: pressing it again while the door is still
                     #   rising sends it back DOWN. After a `use`, hold off for ~30 game tics.
                     if mech and macro == "use" and mem.last_use_tic is not None and \

@@ -609,6 +609,7 @@ static const char *weapon_name(weapontype_t w)
  * judging depth in the rendered view. */
 #define AGENT_RAY_RANGE 2048 /* map units scanned per ray */
 static fixed_t s_ray_hit_frac;
+static line_t *s_ray_hit_line;    /* the line the ray stopped at */
 static boolean s_ray_hit_is_door; /* hit line is a two-sided line currently too closed to pass */
 static boolean s_ray_hit_is_lift; /* ...or a raised lift (step too high, lift special on the line) */
 static fixed_t s_ray_floor;       /* floor height of the sector the ray is currently in */
@@ -641,6 +642,81 @@ static boolean agent_is_lift_special(short special)
         return true;
     default:
         return false;
+    }
+}
+
+/* What a USE does on a line with this special (P_UseSpecialLine's manual doors and
+ * switches; walk-over specials do nothing on USE): NULL = nothing. */
+static const char *agent_use_kind(short special)
+{
+    switch (special) {
+    case 1: case 26: case 27: case 28: case 31: case 32: case 33: case 34: case 117: case 118:
+        return "door";
+    case 21: case 62: case 122: case 123:
+        return "lift";
+    case 11: case 51:
+        return "exit";
+    case 7: case 9: case 14: case 15: case 18: case 20: case 23: case 29: case 41: case 42:
+    case 43: case 45: case 49: case 50: case 55: case 60: case 61: case 63: case 64: case 65:
+    case 66: case 67: case 68: case 69: case 70: case 71: case 99: case 101: case 102: case 103:
+    case 111: case 112: case 113: case 114: case 115: case 116: case 127: case 131: case 132:
+    case 133: case 134: case 135: case 136: case 137: case 138: case 139: case 140:
+        return "switch";
+    default:
+        return NULL;
+    }
+}
+
+/* Bearing in degrees from the player's facing to a map point, + = right (Doom
+ * angles grow counter-clockwise, i.e. to the left). */
+static int agent_bearing_to(const mobj_t *pm, fixed_t x, fixed_t y)
+{
+    angle_t rel = R_PointToAngle2(pm->x, pm->y, x, y) - pm->angle;
+    int bearing = (int)(((uint64_t)rel * 360u) >> 32);
+    if (bearing > 180) {
+        bearing -= 360;
+    }
+    return -bearing;
+}
+
+/* USE probe: the same trace as P_UseLines / PTR_UseTraverse (USERANGE straight
+ * along the facing; a plain line with no opening stops it = "oof"), recording
+ * the special line a USE pressed now would activate, without activating it. */
+static line_t *s_use_line;
+
+static boolean agent_use_traverse(intercept_t *in)
+{
+    if (!in->d.line->special) {
+        P_LineOpening(in->d.line);
+        return openrange > 0; /* a wall first: USE stops here and does nothing */
+    }
+    s_use_line = in->d.line;
+    return false;
+}
+
+static void agent_probe_use(const player_t *pl, mobj_t *pm, doom_agent_obs_t *o)
+{
+    unsigned fa = pm->angle >> ANGLETOFINESHIFT;
+    s_use_line = NULL;
+    P_PathTraverse(pm->x, pm->y, pm->x + (USERANGE >> FRACBITS) * finecosine[fa],
+                   pm->y + (USERANGE >> FRACBITS) * finesine[fa], PT_ADDLINES, agent_use_traverse);
+    /* P_UseSpecialLine ignores the back side of a line. */
+    if (s_use_line == NULL || P_PointOnLineSide(pm->x, pm->y, s_use_line) != 0) {
+        return;
+    }
+    o->use_target = agent_use_kind(s_use_line->special);
+    switch (s_use_line->special) { /* key doors: without the key USE only says so */
+    case 26: case 32:
+        o->use_locked = !pl->cards[it_bluecard] && !pl->cards[it_blueskull];
+        break;
+    case 27: case 34:
+        o->use_locked = !pl->cards[it_yellowcard] && !pl->cards[it_yellowskull];
+        break;
+    case 28: case 33:
+        o->use_locked = !pl->cards[it_redcard] && !pl->cards[it_redskull];
+        break;
+    default:
+        break;
     }
 }
 
@@ -688,6 +764,7 @@ static boolean agent_ray_traverse(intercept_t *in)
     }
     if (blocking) {
         s_ray_hit_frac = in->frac;
+        s_ray_hit_line = li;
         s_ray_hit_is_door = is_door;
         s_ray_hit_is_lift = is_lift;
         return false; /* stop at the first obstruction */
@@ -713,6 +790,7 @@ static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door, boolean
     fixed_t x2 = pm->x + FixedMul(range, finecosine[fa]);
     fixed_t y2 = pm->y + FixedMul(range, finesine[fa]);
     s_ray_hit_frac = 0;
+    s_ray_hit_line = NULL;
     s_ray_hit_is_door = false;
     s_ray_hit_is_lift = false;
     s_ray_floor = s_ray_base = pm->subsector->sector->floorheight;
@@ -776,16 +854,9 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         if (mo == pm || mo->health <= 0 || !(mo->flags & MF_SHOOTABLE)) {
             continue;
         }
-        /* In front, within the rendered field of view... */
-        angle_t rel = R_PointToAngle2(pm->x, pm->y, mo->x, mo->y) - pm->angle;
-        int bearing = (int)(((uint64_t)rel * 360u) >> 32);
-        if (bearing > 180) {
-            bearing -= 360;
-        }
-        /* Doom angles grow counter-clockwise, so a positive rel means the thing is
-         * to the LEFT. Flip it so positive = RIGHT of centre, matching the tools,
-         * the `walls` fan and the automap. */
-        bearing = -bearing;
+        /* In front, within the rendered field of view (+ = right of centre,
+         * matching the tools, the `walls` fan and the automap)... */
+        int bearing = agent_bearing_to(pm, mo->x, mo->y);
         if (bearing < -AGENT_FOV_DEG || bearing > AGENT_FOV_DEG) {
             continue;
         }
@@ -819,26 +890,40 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     o->num_rays = DOOM_AGENT_NUM_RAYS;
     int ray_mid = (DOOM_AGENT_NUM_RAYS - 1) / 2;
     int best_door_absb = 1000; /* most-central door ray seen so far, by |bearing| */
+    line_t *door_line = NULL;
     for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
         int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
         boolean is_door = false;
         boolean is_lift = false;
-        int dist = agent_cast_ray(pm, bearing, &is_door, &is_lift, &o->walls[i]);
+        agent_cast_ray(pm, bearing, &is_door, &is_lift, &o->walls[i]);
         /* Report the closed door/passage in view so the agent can tell a re-shut
          * door (press use again) from a solid wall (go around). A door usually
-         * spans several rays; report the most central one so bearing points at the
-         * door itself, not its edge. */
+         * spans several rays: take the line of the most central one. */
         if (is_door) {
             int absb = bearing < 0 ? -bearing : bearing;
             if (absb < best_door_absb) {
                 best_door_absb = absb;
+                door_line = s_ray_hit_line;
                 o->door_ahead_valid = true;
-                o->door_ahead_bearing = bearing;
-                o->door_ahead_dist = dist;
                 o->door_ahead_lift = is_lift;
             }
         }
     }
+    if (door_line != NULL) {
+        /* Point at the middle of the door, not at the ray that found it: from beside
+         * a door the most central ray can just graze its end, and USE (straight
+         * along the facing) then hits the wall next to it. On the board that read
+         * "door 22 units, +3 deg", USE went "oof" twice and the door was given up. */
+        fixed_t mx = door_line->v1->x / 2 + door_line->v2->x / 2;
+        fixed_t my = door_line->v1->y / 2 + door_line->v2->y / 2;
+        o->door_ahead_bearing = agent_bearing_to(pm, mx, my);
+        o->door_ahead_dist = P_AproxDistance(mx - pm->x, my - pm->y) >> FRACBITS;
+        /* A window, a door only a switch opens, or a walk-over lift is "shut" but
+         * USE does nothing on it. */
+        o->door_ahead_usable = agent_use_kind(door_line->special) != NULL;
+    }
+
+    agent_probe_use(pl, pm, o);
 }
 
 /* Map glyph priority when lines share a cell: a wall wins over a hazard edge,

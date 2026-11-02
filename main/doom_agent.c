@@ -130,7 +130,18 @@ static char *build_obs_json(const doom_agent_obs_t *o)
                 if (o->door_ahead_lift) {
                     cJSON_AddStringToObject(d, "kind", "lift");
                 }
+                cJSON_AddBoolToObject(d, "usable", o->door_ahead_usable);
             }
+        }
+        /* What a USE pressed now would activate; always present (null = nothing)
+         * so a client can tell this firmware from one without the probe. */
+        if (o->use_target) {
+            cJSON_AddStringToObject(r, "use_target", o->use_target);
+        } else {
+            cJSON_AddNullToObject(r, "use_target");
+        }
+        if (o->use_locked) {
+            cJSON_AddBoolToObject(r, "use_locked", true);
         }
         /* True when a requested move barely shifted the player (ran into something). */
         cJSON_AddBoolToObject(r, "blocked", o->blocked);

@@ -362,7 +362,7 @@ game running until the next action (then `tics` = auto-release timeout, default 
  "health":..,"armor":..,"weapon":"shotgun","ammo":..,"episode":..,"map":..,
  "visible":[{"name":"imp","dist":410,"bearing":-12}, ...],
  "walls":[{"bearing":-45,"dist":..}, ..., {"bearing":45,"dist":..}],
- "door_ahead":{"bearing":..,"dist":..},"blocked":false}
+ "door_ahead":{"bearing":..,"dist":..,"usable":true},"use_target":null,"blocked":false}
 ```
 
 `angle` is a **compass heading**: 0 = north, 90 = east, clockwise — the same frame
@@ -377,10 +377,20 @@ along rays fanned across the field of view (the depth of the rendered view) — 
 it to judge how far you can advance and to spot openings (a ray noticeably longer
 than its neighbours is a passage). Rays only cover the FOV, never behind you.
 
-`door_ahead` appears **only** when a closed door/passage is in view (nearest one,
-as `{bearing, dist}`): press use to open it; if it reappears after you opened it
-the door re-closed, so press use again instead of walking into it. `blocked` is
-true when your last move barely shifted you (you ran into a wall or a shut door).
+`door_ahead` appears **only** when a closed door/passage is in view (the most
+central one, as `{bearing, dist, usable}`): bearing and dist point at the **middle**
+of the door line (since v0.6.2; bearing can exceed ±45 when only the door's edge is
+in view), `usable` is false when USE cannot open it (a window, a door a switch
+opens, a walk-over lift). Press use to open it; if it reappears after you opened it
+the door re-closed, so press use again instead of walking into it.
+
+`use_target` (since v0.6.2, always present) is what a USE pressed **now** would
+activate: the firmware runs the same 64-unit trace along the facing as Doom's
+`P_UseLines`, without activating anything. `"door"`, `"lift"`, `"switch"`,
+`"exit"` (the level-exit switch), or `null` = nothing (a wall comes first, or the
+door is beside you, not in front). `use_locked: true` = a key door you have no key
+for. `blocked` is true when your last move barely shifted you (you ran into a wall
+or a shut door).
 
 `visible` lists **only what the player can see on screen** — things inside the
 field of view *and* in line of sight, ordered left-to-right. Enemies behind you or
