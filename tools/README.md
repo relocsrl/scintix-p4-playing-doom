@@ -397,6 +397,35 @@ field of view *and* in line of sight, ordered left-to-right. Enemies behind you 
 hidden behind walls are **not** reported, and there are no targeting hints: the
 model makes all tactical decisions itself.
 
+Since v0.6.3, also only what a player sees on screen or on the status bar:
+
+- `items` — pickups lying in view within 1024 units, nearest first:
+  `{name, kind, dist, bearing}`, kind = `health` / `armor` / `ammo` / `weapon` /
+  `key` / `powerup` (`medikit`, `clip`, `shotgun`, `blue_keycard`, ...). Walk over
+  one to pick it up (Doom leaves a medikit at full health, ammo at the maximum).
+- `missiles` — projectiles in flight in view (imp fireballs, rockets...), not your
+  own: `{name, dist, bearing, dz, incoming}`. `incoming: true` = on its course it
+  hits you (closest approach within both radii, at a height your body occupies, so
+  a fireball lobbed from a ledge counts too); then also `eta` (tics until it does)
+  and `dodge` (`left` / `right`: the strafe that takes you off its line).
+- `weapons`, `keys`, `ammo_all`, `ammo_max` — the status bar: weapons owned, keys
+  held, ammo per type (`bullets`, `shells`, `cells`, `rockets`) and its maximum.
+- `switch_ahead` — `{bearing, dist}` of a switch panel not flipped yet (an SW1
+  texture) on a wall in view within 1024 units. A level ends at its exit switch,
+  which is in the room behind the EXIT door — on E1M1 a plain switch on a side wall,
+  not under the EXIT sign.
+- `use_target` can also be `"open_door"`: the door in front is already open (USE
+  would close it again).
+- `hurt` — `{amount, from}` when you lost health since the last observation: `from`
+  = `ahead` / `left` / `right` / `behind` (the side the hit came from, as the red
+  flash and the status-bar face show it), `null` = no attacker (damaging floor).
+- `door_ahead` is only a real door now: a two-sided line whose far sector is shut
+  (or a manual door line), not a ledge under a low lintel.
+
+The board's settings API (`GET /api/settings`) also reports `audio_status`: `"ok"`
+or why there is no sound (codec not answering on I2C, setup failed...); the same
+line is on the settings page, and `doom_jev_agent.py` prints it at start.
+
 **Automap** — send `{"request":"map"}` (or `{"map":true}`) and the device replies
 with the ASCII automap, the same information the in-game automap shows:
 

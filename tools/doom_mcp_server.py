@@ -71,10 +71,26 @@ _OBS = (
     "door takes ~30 tics to rise clear, so use with tics>=30 (or keep advancing). If "
     "door_ahead reappears after you opened it, the door re-closed, so press use again "
     "instead of walking into it. `use_target` = what is under your crosshair within "
-    "USE reach (64 units straight ahead): 'door', 'lift', 'switch' or null = nothing "
+    "USE reach (64 units straight ahead): 'door', 'lift', 'switch', 'open_door' (already "
+    "open: walk through, USE would close it) or null = nothing "
     "(turn to face the door's middle first); `use_locked` = a key door you have no "
     "key for. `exit_sign` = {bearing, dist} of a wall with EXIT written on it in view "
-    "(an exit sign, door or switch): the level exit is that way. `blocked` = true "
+    "(an exit sign, door or switch): the level exit is that way. `switch_ahead` = "
+    "{bearing, dist} of a switch panel on a wall in view, not flipped yet: a level ends "
+    "when you press its exit switch, which sits in the room behind the EXIT door (often "
+    "on a side wall, not under the sign). `items` = pickups "
+    "lying in view within 1024 units, nearest first, each {name, kind (health / armor / "
+    "ammo / weapon / key / powerup), dist, bearing}: walk over one to pick it up (Doom "
+    "leaves a medikit at full health, ammo at the maximum). `missiles` = projectiles "
+    "in flight in view (imp fireballs, rockets...), each {name, dist, bearing, dz "
+    "(height above your feet), incoming}; an `incoming` one is on a course that hits "
+    "you, with `eta` (tics until it does) and `dodge` (left / right: the strafe that "
+    "takes you off its line). The status bar: `weapons` owned, `keys` held, `ammo_all` / "
+    "`ammo_max` per ammo type (bullets, shells, cells, rockets). Doom switches to the "
+    "fist by itself when the gun runs dry. `hurt` = {amount, from} when you lost health "
+    "since the last step: `from` = ahead / left / right / behind (the side the hit came "
+    "from, as the red flash and the status-bar face show it), null = no attacker "
+    "(damaging floor) - hit from a side you cannot see: turn to it. `blocked` = true "
     "when your last move made no progress in the direction you asked for (you ran "
     "into a wall or a shut door)."
 )
@@ -117,7 +133,9 @@ def strafe_right(tics: int = DEFAULT_TICS) -> dict:
     return _step({"strafe": "right", "tics": tics})
 
 
-@mcp.tool(description="Fire the current weapon for `tics` tics (hold to keep firing)." + _OBS)
+@mcp.tool(description="Fire the current weapon for `tics` tics (hold to keep firing). Useful "
+                      "reach: fist / chainsaw ~80, shotgun ~400, pistol ~500, chaingun ~600 - "
+                      "farther shots mostly miss." + _OBS)
 def fire(tics: int = DEFAULT_TICS) -> dict:
     return _step({"fire": True, "tics": tics})
 

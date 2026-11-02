@@ -208,7 +208,15 @@ class Thing:
         self.melee = melee        # damage per bite (every 35 tics, within 64 units)
         self.radius = radius
         self.bite_timer = 0
+        self.shot_timer = 0
         self.alive = True
+
+
+# Pickups and projectiles, like the firmware's `items` / `missiles`.
+ITEM_RANGE = 1024
+FIREBALL_SPEED = 10.0       # units/tic (an imp fireball)
+FIREBALL_EVERY = 105        # tics between an imp's throws while it sees the marine
+FIREBALL_DAMAGE = 10
 
 
 # ----------------------------------------------------------------------------
@@ -242,6 +250,13 @@ class World:
             Thing("zombieman", 1000, 330, 20, speed=1.0, melee=4),
             Thing("barrel", 1900, 300, 20, radius=10),
         ]
+        # pickups on the way: a clip in room A, a shotgun and a medikit in room B
+        self.items = [
+            {"name": "clip", "kind": "ammo", "x": 600.0, "y": 520.0},
+            {"name": "shotgun", "kind": "weapon", "x": 1700.0, "y": 560.0},
+            {"name": "medikit", "kind": "health", "x": 2400.0, "y": 0.0},
+        ]
+        self.missiles = []          # {"x","y","vx","vy","life"}
         self.reset_player()
         self.gametic = 0
         self.steps = 0
@@ -268,7 +283,9 @@ class World:
         self.turnheld = 0
         self.health = self.start_hp if (self.map == 1 and self.deaths == 0) else 100
         self.armor = 0
-        self.ammo = 50
+        self.ammo = 50              # bullets
+        self.shells = 0
+        self.owned = ["fist", "pistol"]
         self.weapon = "pistol"
         self.fire_timer = 0
         self.use_latched = False
@@ -399,10 +416,64 @@ class World:
         # fire
         if self.fire_timer > 0:
             self.fire_timer -= 1
-        if keys.get("fire") and self.ammo > 0 and self.fire_timer == 0:
-            self.fire_timer = 10           # one pistol shot per 10 tics
-            self.ammo -= 1
-            self.shoot()
+        if keys.get("fire") and self.fire_timer == 0:
+            if self.weapon == "fist":
+                self.fire_timer = 15
+                self.shoot(reach=80, damage=(2, 10, 20))
+            elif self.weapon == "shotgun" and self.shells > 0:
+                self.fire_timer = 37
+                self.shells -= 1
+                self.shoot(damage=(30, 50, 70) if self.nearest_dist() < 400 else (5, 10, 20))
+            elif self.weapon == "pistol" and self.ammo > 0:
+                self.fire_timer = 10           # one pistol shot per 10 tics
+                self.ammo -= 1
+                self.shoot(damage=(5, 10, 15) if self.nearest_dist() < 500 else (0, 0, 5))
+        # out of ammo: Doom switches to the fist by itself
+        if (self.weapon == "pistol" and self.ammo <= 0) or (self.weapon == "shotgun" and self.shells <= 0):
+            self.weapon = "pistol" if self.ammo > 0 else "fist"
+        # pickups: walked over (Doom leaves a medikit at full health)
+        for it in list(self.items):
+            if math.hypot(it["x"] - self.px, it["y"] - self.py) > 32:
+                continue
+            if it["name"] == "medikit":
+                if self.health >= 100:
+                    continue
+                self.health = min(100, self.health + 25)
+            elif it["name"] == "clip":
+                self.ammo = min(200, self.ammo + 10)
+                if self.weapon == "fist":
+                    self.weapon = "pistol"
+            elif it["name"] == "shotgun":
+                self.owned.append("shotgun")
+                self.shells = min(50, self.shells + 8)
+                self.weapon = "shotgun"
+            self.items.remove(it)
+            if self.verbose:
+                print(f"  [sim] picked up {it['name']}", flush=True)
+        # imp fireballs
+        for t in self.things:
+            if t.alive and t.name == "imp" and 150 < math.hypot(t.x - self.px, t.y - self.py) < 1200 and \
+                    self.los(t.x, t.y):
+                t.shot_timer += 1
+                if t.shot_timer >= FIREBALL_EVERY:
+                    t.shot_timer = 0
+                    d = math.hypot(self.px - t.x, self.py - t.y)
+                    self.missiles.append({"x": t.x, "y": t.y, "life": 200,
+                                          "vx": (self.px - t.x) / d * FIREBALL_SPEED,
+                                          "vy": (self.py - t.y) / d * FIREBALL_SPEED})
+        for m in list(self.missiles):
+            m["x"] += m["vx"]
+            m["y"] += m["vy"]
+            m["life"] -= 1
+            if math.hypot(m["x"] - self.px, m["y"] - self.py) < 22:
+                self.missiles.remove(m)
+                self.health = max(0, self.health - FIREBALL_DAMAGE)
+                if self.verbose:
+                    print(f"  [sim] fireball hit, hp={self.health}", flush=True)
+                if self.health <= 0:
+                    self.deaths += 1
+            elif m["life"] <= 0 or any(point_seg_dist(m["x"], m["y"], w) < 6 for w in self.blocking_walls()):
+                self.missiles.remove(m)
         # monsters
         for t in self.things:
             if not t.alive or t.speed == 0:
@@ -432,18 +503,23 @@ class World:
         if self.realtime:
             time.sleep(TIC_SECONDS)
 
-    def shoot(self):
+    def nearest_dist(self):
+        return min((math.hypot(t.x - self.px, t.y - self.py) for t in self.things if t.alive), default=9999)
+
+    def shoot(self, reach=9999, damage=(5, 10, 15)):
         best, best_b = None, 999
         for t in self.things:
             if not t.alive:
                 continue
             b = self.bearing_to(t.x, t.y)
             d = math.hypot(t.x - self.px, t.y - self.py)
+            if d > reach:
+                continue
             half = math.degrees(math.atan2(t.radius, max(d, 1))) + 2.0
             if abs(b) <= half and self.los(t.x, t.y) and abs(b) < best_b:
                 best, best_b = t, abs(b)
         if best is not None:
-            best.hp -= self.rng.choice((5, 10, 15))
+            best.hp -= self.rng.choice(damage)
             if best.hp <= 0:
                 best.alive = False
                 if self.verbose:
@@ -515,14 +591,45 @@ class World:
             visible.append({"name": t.name, "dist": int(math.hypot(t.x - self.px, t.y - self.py)),
                             "bearing": int(round(b))})
         visible.sort(key=lambda v: v["bearing"])
+        items = []
+        for it in self.items:
+            b = self.bearing_to(it["x"], it["y"])
+            d = math.hypot(it["x"] - self.px, it["y"] - self.py)
+            if abs(b) <= FOV and d <= ITEM_RANGE and self.los(it["x"], it["y"]):
+                items.append({"name": it["name"], "kind": it["kind"], "dist": int(d), "bearing": int(round(b))})
+        items.sort(key=lambda i: i["dist"])
+        missiles = []
+        for m in self.missiles:
+            b = self.bearing_to(m["x"], m["y"])
+            if abs(b) > FOV or not self.los(m["x"], m["y"]):
+                continue
+            rec = {"name": "imp_fireball", "dist": int(math.hypot(m["x"] - self.px, m["y"] - self.py)),
+                   "bearing": int(round(b)), "dz": 24, "incoming": False}
+            # like the firmware: closest approach on its course, then the sidestep off its line
+            px, py = m["x"] - self.px, m["y"] - self.py
+            vv = m["vx"] ** 2 + m["vy"] ** 2
+            t = -(px * m["vx"] + py * m["vy"]) / vv if vv > 0 else -1
+            cx, cy = px + m["vx"] * t, py + m["vy"] * t
+            if t > 0 and math.hypot(cx, cy) <= 16 + 6 + 8:
+                ra = math.radians(self.doom_angle - 90)
+                rec.update(incoming=True, eta=int(t + 0.5),
+                           dodge="right" if math.cos(ra) * -cx + math.sin(ra) * -cy > 0 else "left")
+            missiles.append(rec)
+        missiles.sort(key=lambda m: m["dist"])
         return {
             "valid": True,
             "x": int(self.px), "y": int(self.py), "z": 0,
             "angle": self.compass(),
             "health": self.health, "armor": self.armor,
-            "weapon": self.weapon, "ammo": self.ammo,
+            "weapon": self.weapon,
+            "ammo": {"pistol": self.ammo, "shotgun": self.shells}.get(self.weapon, -1),
+            "weapons": list(self.owned), "keys": [],
+            "ammo_all": {"bullets": self.ammo, "shells": self.shells, "cells": 0, "rockets": 0},
+            "ammo_max": {"bullets": 200, "shells": 50, "cells": 300, "rockets": 50},
             "episode": 1, "map": self.map,
             "visible": visible[:16],
+            "items": items[:8],
+            "missiles": missiles[:6],
             "walls": walls,
             **({"door_ahead": door} if door else {}),
             "use_target": self.use_probe(),
@@ -657,8 +764,10 @@ class World:
         }
         w = action.get("weapon")
         if isinstance(w, int) and 1 <= w <= 7:
-            self.weapon = {1: "fist", 2: "pistol", 3: "shotgun", 4: "chaingun", 5: "rocket_launcher",
-                           6: "plasma_rifle", 7: "bfg9000"}[w] if w == 2 else self.weapon  # only the pistol is owned
+            name = {1: "fist", 2: "pistol", 3: "shotgun", 4: "chaingun", 5: "rocket_launcher",
+                    6: "plasma_rifle", 7: "bfg9000"}[w]
+            if name in self.owned:
+                self.weapon = name
         if action.get("hold") is True:
             return self.hold_step(action, keys, tics)
         self.leave_realtime()

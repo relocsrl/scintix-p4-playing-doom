@@ -238,6 +238,8 @@ MACROS = {
              "`lift`), flips a switch. When `use_now` is present (not null) it is what "
              "is under your crosshair within USE reach (door / lift / switch): press "
              "`use` then; a switch you have not flipped yet is always worth a press. "
+             "`use_now` = `open_door`: WRONG - the door is already open and USE would shut "
+             "it: walk through instead. "
              "`use_now` null = this USE would hit nothing (a wall, or the door is to the "
              "side): turn toward door_ahead.bearing first. Without `use_now` in the state: "
              "USE reaches about 64 units, so it is right when door_ahead is very close "
@@ -377,6 +379,36 @@ STATE_LEGEND = (
     "anywhere in the cone, and because decisions lag ~0.7 s a turn to 'centre better' "
     "acts on an old bearing and overshoots, which is what makes you swing past the "
     "enemy again and again. Only turn when the enemy is outside the cone. "
+    "`aim.in_range` = the enemy is within your weapon's useful reach (`aim.weapon_range`: "
+    "fist / chainsaw ~80, shotgun ~400, pistol ~500, chaingun ~600): beyond it shots "
+    "mostly miss and a fist does nothing, so do NOT stand and fire at it - close in while "
+    "firing, switch to a better weapon, or (no gun with ammo) go for ammo (`pickup`) or "
+    "get out of its sight. "
+    "`player.weapons` / `player.ammo_all` (now/max per ammo type) / `player.keys` = what "
+    "the status bar shows. Doom switches to the fist by itself when the gun runs dry, "
+    "and back to the gun when you pick up its ammo. "
+    "`incoming` = a projectile (imp fireball, rocket...) on a course that hits you "
+    "{name, eta_tics until it hits (35 = 1 s), dodge (left / right: the sidestep that "
+    "takes you off its line), dist, bearing, dz (its height above your feet)}: with "
+    "eta_tics <= 20 sidestep that way NOW (strafe_left / strafe_right) - it beats "
+    "everything else, a fireball costs ~10-20 health; with more time finish the move "
+    "first. `missiles_in_view` = every projectile in view (incoming or passing by). "
+    "`hurt` {amount, from} = you lost that much health since the last step (the red "
+    "flash; the status-bar face looks toward the attacker): `from` = ahead / left / right "
+    "/ behind, null = no attacker (damaging floor). Hit from left / right / behind with "
+    "no enemy in view = someone you cannot see is shooting you: turn toward it at once "
+    "(`turn_around` for behind, turn_left / turn_right for the sides) and fight back, or "
+    "move out of its line of fire - never keep standing, waiting or pressing USE while "
+    "you are being hit. "
+    "`items_in_view` = pickups on the floor in view {name, kind (health / armor / ammo / "
+    "weapon / key / powerup), dist, bearing, wanted (it gives you something now: Doom "
+    "leaves a medikit on the floor at full health, ammo at the maximum)}; you pick one "
+    "up by walking over it. `pickup` = the one worth going for now {name, kind, bearing, "
+    "dist, in_view (false = remembered, out of view: turn to it), urgent}: urgent = a key "
+    "(locked doors need it), a weapon you do not own, health while health < 50, ammo "
+    "while your guns are (nearly) empty - go for it as soon as nothing is about to hit "
+    "you and no enemy is in your face, even before the exit; not urgent = close and "
+    "useful: grab it on the way, but reaching a known exit comes first. "
     "`hazards_in_view` are exploding barrels: "
     "obstacles, NOT targets - never turn to centre one or walk into it, go around "
     "it (a shot barrel hurts everything within ~128 units, you included). "
@@ -411,6 +443,16 @@ STATE_LEGEND = (
     "sign, door or switch); `exit_seen` = where you saw one before, from here. That is "
     "the way out of the level: once seen, head there (it beats `explore`), open the "
     "door under or near it and press the switch you find there. "
+    "`switch_ahead` {bearing, dist} = a switch panel on a wall in view, not flipped yet "
+    "(bearing / dist to its middle); `switch_seen` = where you saw one, from here. Walk "
+    "up to it, face it until `use_now` is `switch`, press `use`. The level ends at a "
+    "switch: in the room behind an EXIT door (or near an EXIT sign) the switch IS the "
+    "exit - the sign itself is only a marker, there is nothing to press under it - so "
+    "go and press that switch before anything else but dodging. `exit: true` on "
+    "switch_ahead / switch_seen = it is the exit switch (next to the EXIT sign; the sign "
+    "is no longer reported): press it now, nothing else is worth a step. "
+    "`use_now` = `open_door`: the door in front of you is already open - walk through "
+    "it, do NOT press use (that closes it again). "
     "`heading` is a compass heading, 0 = north, 90 = east. "
     "`commander` (when present) is the strategic layer's current intent: "
     "`turn_hint` says which way to turn to get on the requested heading. It is a "
@@ -425,7 +467,9 @@ STATE_LEGEND = (
 MAP_LEGEND = ("north up, '#' = wall (or closed door / ledge too high), ':' = walkable step "
               "edge (stairs), '~' = edge of a damaging floor, 'E' = a wall with EXIT on it "
               "that you saw, '.' = explored floor (walked, or seen in your view), '@' = you, "
-              "' ' = never seen")
+              "' ' = never seen, 'S' = a switch you saw and have not flipped; pickups seen "
+              "and still there: 'h' health, 'a' ammo, "
+              "'w' weapon, 'k' key, 'r' armor, 'p' powerup")
 
 # Visited ground: what the marine remembers of where it has been (a player does;
 # the automap only draws walls, so walked floor and never-seen floor are both ' ').
@@ -578,6 +622,14 @@ class Memory:
         self.pending_view = None  # (level, x, y, angle, [(bearing, dist)]) of the last frame
         self.last_visit = None    # (level, x, y) of the last marked position
         self.exit_seen = None     # {"x","y","level"}: the last EXIT sign seen
+        # Pickups seen and (as far as the marine knows) still there: a player remembers
+        # the medikit in the last room and goes back for it when hurt.
+        self.items = {}           # (episode, map) -> [{"name","kind","x","y","seen_step"}]
+        # The last switch seen and not flipped yet. On the board the marine went into
+        # E1M1's exit room, walked to the EXIT sign hanging at the far end, found a wall
+        # and left: the exit switch (a plain switch panel on the side wall) was never
+        # reported, only doors and lifts were.
+        self.switch_seen = None   # {"x","y","level"}
 
     def note_visit(self, obs):
         """Mark the ground around the marine (and along the way from the last mark)."""
@@ -668,6 +720,89 @@ class Memory:
         return {"bearing": round(bearing_to(obs, e["x"], e["y"])),
                 "dist": round(math.hypot(e["x"] - obs["x"], e["y"] - obs["y"]))}
 
+    def note_items(self, obs):
+        """Remember the pickups in view; forget one when the marine stands on its spot
+        and it is not in view (picked up), or its spot is in plain view without it."""
+        if not obs.get("valid") or "items" not in obs:
+            return
+        lvl = (obs.get("episode"), obs.get("map"))
+        x, y = obs["x"], obs["y"]
+        seen = []
+        for it in obs["items"]:
+            a = math.radians(obs["angle"] + it["bearing"])
+            seen.append({"name": it["name"], "kind": it["kind"], "seen_step": self.steps,
+                         "x": x + it["dist"] * math.sin(a), "y": y + it["dist"] * math.cos(a)})
+        keep = []
+        for k in self.items.get(lvl, []):
+            if any(s["name"] == k["name"] and math.hypot(s["x"] - k["x"], s["y"] - k["y"]) <= ITEM_SAME
+                   for s in seen):
+                continue                      # seen again: the new sighting replaces it
+            d = math.hypot(k["x"] - x, k["y"] - y)
+            if d <= 32:
+                continue                      # walked over it and it is not in view: taken
+            b = bearing_to(obs, k["x"], k["y"])
+            if abs(b) <= 40 and 64 < d < 1000:
+                ray = min(obs.get("walls", []), key=lambda w: abs(w["bearing"] - b), default=None)
+                if ray and ray["dist"] > d + 16:
+                    continue                  # its spot is in plain view and it is not there
+            keep.append(k)
+        self.items[lvl] = keep + seen
+
+    def note_switch(self, obs):
+        """Remember the switch in view; forget it once its spot is in plain view
+        without one (flipped: its panel changed)."""
+        if not obs.get("valid"):
+            return
+        lvl = (obs.get("episode"), obs.get("map"))
+        s = obs.get("switch_ahead")
+        if s:
+            a = math.radians(obs["angle"] + s["bearing"])
+            self.switch_seen = {"x": obs["x"] + s["dist"] * math.sin(a),
+                                "y": obs["y"] + s["dist"] * math.cos(a), "level": lvl}
+            return
+        k = self.switch_seen
+        if k and k["level"] == lvl:
+            d = math.hypot(k["x"] - obs["x"], k["y"] - obs["y"])
+            b = bearing_to(obs, k["x"], k["y"])
+            if abs(b) <= 40 and d < 900:
+                ray = min(obs.get("walls", []), key=lambda w: abs(w["bearing"] - b), default=None)
+                if ray and ray["dist"] >= d - 32:
+                    self.switch_seen = None
+
+    def switch_from_here(self, obs):
+        k = self.switch_seen
+        if not k or k["level"] != (obs.get("episode"), obs.get("map")) or not obs.get("valid"):
+            return None
+        return {"bearing": round(bearing_to(obs, k["x"], k["y"])),
+                "dist": round(math.hypot(k["x"] - obs["x"], k["y"] - obs["y"]))}
+
+    def items_from_here(self, obs):
+        """Remembered pickups on this level, from the marine now, nearest first."""
+        out = []
+        for k in self.items.get((obs.get("episode"), obs.get("map")), []):
+            out.append({"name": k["name"], "kind": k["kind"],
+                        "bearing": round(bearing_to(obs, k["x"], k["y"])),
+                        "dist": round(math.hypot(k["x"] - obs["x"], k["y"] - obs["y"])),
+                        "in_view": k["seen_step"] == self.steps})
+        return sorted(out, key=lambda i: i["dist"])
+
+    def pickup(self, obs):
+        """The pickup worth going for now: an urgent one (item_urgent) at any distance,
+        in view or remembered; another only when in view and close."""
+        best = None
+        for it in self.items_from_here(obs):
+            if not item_wanted(obs, it):
+                continue
+            if it["name"] in MINOR_ITEMS and (it["dist"] > MINOR_NEAR or not it["in_view"]):
+                continue
+            urgent = item_urgent(obs, it)
+            if not urgent and (it["dist"] > PICKUP_NEAR or not it["in_view"]):
+                continue
+            score = it["dist"] - (4000 if urgent else 0)
+            if best is None or score < best[0]:
+                best = (score, dict(it, urgent=urgent))
+        return best[1] if best else None
+
     def map_with_visits(self, map_json, obs):
         """The automap with explored floor marked '.' on empty cells: the path walked
         and the floor seen in the view (not the wider walked swath, which would leak
@@ -692,6 +827,19 @@ class Memory:
                     wx = ox + col * upc + upc / 2
                     if (int(wx // VISIT_CELL), int(wy // VISIT_CELL)) in cells:
                         line[col] = "."
+        # pickups remembered (still there when last seen), on open floor only
+        for k in self.items.get(lvl, []):
+            if k["name"] in MINOR_ITEMS:
+                continue
+            col, row = int((k["x"] - ox) // upc), int((oy - k["y"]) // upc)
+            if 0 <= row < len(grid) and 0 <= col < len(grid[row]) and grid[row][col] in " .":
+                grid[row][col] = ITEM_GLYPH.get(k["kind"], "p")
+        # the switch seen and not flipped yet: on its wall
+        k = self.switch_seen
+        if k and k["level"] == lvl:
+            col, row = int((k["x"] - ox) // upc), int((oy - k["y"]) // upc)
+            if 0 <= row < len(grid) and 0 <= col < len(grid[row]):
+                grid[row][col] = "S"
         out = dict(map_json)
         out["grid"] = ["".join(r) for r in grid]
         return out
@@ -776,6 +924,8 @@ class Memory:
         self.mask_walk_blocks(obs)
         self.note_view(obs)
         self.note_visit(obs)
+        self.note_items(obs)
+        self.note_switch(obs)
         if obs.get("valid"):
             now = time.time()
             self.positions.append((now, obs["x"], obs["y"], obs["health"]))
@@ -894,9 +1044,10 @@ class JevFatal(JevError):
     """An error retrying cannot fix: bad key (401/403) or a request the API rejects (4xx)."""
 
 
-def build_questions(intent):
-    fire_true = ("An enemy in enemies_in_view is roughly centred (|bearing| <= 10) "
-                 "and within 1500 units, and ammo is not 0.")
+def build_questions(intent, obs=None):
+    fire_true = ("An enemy in enemies_in_view is roughly centred (|bearing| <= 10), "
+                 "within your weapon's reach (aim.in_range), and ammo is not 0 (the fist "
+                 "and chainsaw need none).")
     fire_false = ("No enemy in enemies_in_view is centred, a barrel in hazards_in_view "
                   "is centred and closer than 200 units (its blast would hurt you), "
                   "or ammo is 0.")
@@ -906,19 +1057,26 @@ def build_questions(intent):
     elif intent.fire_policy == "conservative":
         fire_true = ("An enemy is well centred (|bearing| <= 6) and within 900 units, "
                      "and ammo is not 0. Save ammo otherwise.")
-    return {
+    questions = {
         "action": {
             "type": "choice",
             "instructions": (
                 "You are the reflexes of the DOOM marine. Pick the ONE macro to run for "
-                "the next ~0.3 s given the state. Priorities: (0) if `floor` is present "
+                "the next ~0.3 s given the state. Priorities: (00) if `incoming` is present "
+                "with eta_tics <= 20, a projectile is about to hit you: sidestep to "
+                "`incoming.dodge` (strafe_left / strafe_right) first; (000) if `hurt.from` is "
+                "left / right / behind and no enemy is in view, turn toward the attacker "
+                "(turn_around / turn_left / turn_right) - you are being shot from out of view; "
+                "(0) if `floor` is present "
                 "(you stand on a damaging floor) and floor.radsuit is false, getting off it "
                 "comes first: walk toward floor.way_off (forward / forward_left / "
                 "forward_right) or `back` out if it is null - never turn in place there - shooting only "
                 "what is already in your sights; (1) do not repeat a macro "
                 "that was just `blocked_last_move` — change direction instead; "
                 "(2) if `aim.on_target`, do NOT turn: `wait` (hold heading) and let "
-                "FIRE do the work - turning here overshoots (lag). If an enemy is in "
+                "FIRE do the work - turning here overshoots (lag); but with `aim.in_range` "
+                "false do not stand still: close in (forward) while firing, or with no gun "
+                "with ammo go for `pickup` / get out of its sight. If an enemy is in "
                 "view but off-centre, turn to centre it (small turn when close to "
                 "centred), keep distance from "
                 "melee enemies closer than 120; barrels (hazards_in_view) are NOT "
@@ -928,7 +1086,13 @@ def build_questions(intent):
                 "it (forward / small turns to centre it) until dist <= 60, then `use`; "
                 "while door_ahead.tics_since_press < 50 `wait` facing it; if it is still "
                 "there at tics_since_press >= 50, `use` again; once door_ahead is gone the "
-                "door is open: walk through it (`forward`); (4) if progress.going_nowhere "
+                "door is open: walk through it (`forward`; `use_now` = `open_door` means "
+                "it is open: never `use` then, it would close); (3a) if `switch_ahead` (or "
+                "`switch_seen`) is present, walk up to it and `use` it once `use_now` is "
+                "`switch` - near an EXIT sign that switch ends the level, it comes first; "
+                "(3b) if `pickup` is present "
+                "and urgent (or close and in view, with no exit known), go and walk over it: "
+                "turn toward pickup.bearing, then forward; (4) if progress.going_nowhere "
                 "or dithering, and no enemy in view and no door rising: do something "
                 "different - turn toward `best_seen` if present (else the longest open "
                 "sector or the best `opening`) and then go forward; keep turning the SAME "
@@ -947,6 +1111,23 @@ def build_questions(intent):
             "criteria": {"true": fire_true, "false": fire_false},
         },
     }
+    # Weapon change: only between the weapons owned that can fire now (status bar).
+    others = [w for w in usable_weapons(obs) if w != obs["weapon"]] if obs and obs.get("valid") else []
+    if obs and "weapons" in obs and others:
+        crit = {"keep": f"Keep the {obs['weapon']}: right most of the time - it has ammo and "
+                        f"suits the distance of the enemy in view, or no enemy is in view."}
+        if obs["weapon"] in MELEE_WEAPONS:
+            crit["keep"] += " Wrong with a gun that has ammo and an enemy out of melee reach."
+        for w in others:
+            crit[w] = WEAPON_DESC.get(w, "Switch to it.")
+        questions["weapon"] = {
+            "type": "choice",
+            "instructions": "Which weapon should the marine hold? Switching takes about half "
+                            "a second; switch for a clearly better weapon for the enemy and "
+                            "distance in view, not back and forth.",
+            "criteria": crit,
+        }
+    return questions
 
 
 class JevClient:
@@ -1032,12 +1213,27 @@ class DryJev:
 
         fire = 0.05
         choice = None
-        centred = [e for e in enemies if abs(e["bearing"]) <= 10 and e["name"] != "barrel"]
-        if centred and state["player"]["ammo"] != 0:
+        player = state["player"]
+        melee = player["weapon"] in MELEE_WEAPONS
+        reach = WEAPON_RANGE.get(player["weapon"], AIM_HOLD_DIST)
+        centred = [e for e in enemies if abs(e["bearing"]) <= 10 and e["name"] != "barrel"
+                   and e["dist"] <= reach]
+        if centred and (melee or player["ammo"] != 0):
             fire = 0.9
         targets = [e for e in enemies if e["name"] != "barrel"]
+        inc = state.get("incoming")
+        pk = state.get("pickup")
+        exit_known = state.get("exit_sign") or state.get("exit_seen")
+        if melee and pk and targets and min(e["dist"] for e in targets) > 150:
+            targets = []                 # fists against a far enemy: go and get ammo instead
         fl = state.get("floor")
-        if fl and not fl.get("radsuit"):
+        hurt_from = (state.get("hurt") or {}).get("from")
+        if inc and (inc.get("eta_tics") or 99) <= DODGE_ETA and inc.get("dodge"):
+            choice = f"strafe_{inc['dodge']}"      # a projectile about to hit: off its line
+        elif hurt_from in ("left", "right", "behind") and not targets:
+            # shot from out of view: face the attacker
+            choice = "turn_around" if hurt_from == "behind" else f"turn_{hurt_from}"
+        elif fl and not fl.get("radsuit"):
             # standing on nukage/slime: getting off it beats everything else
             wo = fl.get("way_off")
             if wo is None:
@@ -1057,10 +1253,25 @@ class DryJev:
             elif e["dist"] < 120:
                 # centred but in melee range: back off, keep firing (hold if backed into a wall)
                 choice = "wait" if blocked and recent and recent[-1] == "back" else "back"
-            elif e["dist"] <= AIM_HOLD_DIST:
+            elif e["dist"] <= reach:
                 choice = "wait"          # centred and in range: hold and fire (a turn overshoots)
             else:
-                choice = "forward"       # centred but far: close in, firing while advancing
+                choice = "forward"       # centred but out of the weapon's reach: close in
+        elif (state.get("switch_ahead") or state.get("switch_seen")) and \
+                (state.get("switch_ahead") or state["switch_seen"])["dist"] <= 600 and n_blocked < 3:
+            # a switch not flipped yet: go and press it (near an EXIT sign it ends the level)
+            sw = state.get("switch_ahead") or state["switch_seen"]
+            b = sw["bearing"]
+            if state.get("use_now") == "switch":
+                choice = "wait" if recent and recent[-1] == "use" else "use"
+            elif abs(b) <= 8 and ahead >= 40 and not blocked:
+                choice = "forward"
+            elif abs(b) <= 25 and sw["dist"] > 100 and ahead >= 120 and not blocked:
+                choice = "forward_left" if b < 0 else "forward_right"
+            elif abs(b) <= 18:
+                choice = "turn_left_small" if b < 0 else "turn_right_small"
+            else:
+                choice = "turn_left" if b < 0 else "turn_right"
         elif door and abs(door["bearing"]) <= 25 and (door["dist"] <= 60 or n_blocked < 2):
             # (a far door behind something that keeps blocking us: the rules below)
             if door["dist"] <= 60:
@@ -1092,6 +1303,15 @@ class DryJev:
                 choice = "forward"
             elif abs(b) <= 18:
                 choice = "turn_left_small" if b < 0 else "turn_right_small"
+            else:
+                choice = "turn_left" if b < 0 else "turn_right"
+        elif pk and (pk.get("urgent") or not exit_known):
+            # a pickup worth it (urgent: before the exit; otherwise close and in view)
+            b = pk["bearing"]
+            if abs(b) <= 10 and ahead >= 48 and not blocked:
+                choice = "forward"
+            elif abs(b) <= 25 and ahead >= 120 and not blocked:
+                choice = "forward_left" if b < 0 else "forward_right"
             else:
                 choice = "turn_left" if b < 0 else "turn_right"
         elif (state.get("exit_sign") or state.get("exit_seen")) and \
@@ -1132,9 +1352,22 @@ class DryJev:
 
         probs = {n: 0.4 / (len(MACRO_NAMES) - 1) for n in MACRO_NAMES}
         probs[choice] = 0.6
-        return ({"action": {"type": "choice", "choice": choice, "probabilities": probs, "confidence": 0.6},
-                 "fire": {"type": "noul", "noul": fire}},
-                {"input_tokens": 0})
+        answers = {"action": {"type": "choice", "choice": choice, "probabilities": probs, "confidence": 0.6},
+                   "fire": {"type": "noul", "noul": fire}}
+        wq = questions.get("weapon")
+        if wq:
+            # the best weapon offered for the nearest enemy's distance (or any gun over the fist)
+            offered = set(wq["criteria"]) | {player["weapon"]}
+            d = min((e["dist"] for e in targets), default=None)
+            if d is not None and d < 300:
+                order = ["super_shotgun", "shotgun", "chaingun", "plasma_rifle", "pistol", "chainsaw", "fist"]
+            else:
+                order = ["chaingun", "shotgun", "plasma_rifle", "rocket_launcher", "pistol",
+                         "super_shotgun", "chainsaw", "fist"]
+            best = next((w for w in order if w in offered), player["weapon"])
+            want = best if best != player["weapon"] and (d is not None or melee) else "keep"
+            answers["weapon"] = {"type": "choice", "choice": want, "confidence": 0.6}
+        return answers, {"input_tokens": 0}
 
 
 # ----------------------------------------------------------------------------
@@ -1222,6 +1455,122 @@ def hurt_ahead(obs, bearing=6):
 AIM_CONE = 8
 AIM_HOLD_DIST = 700
 
+# Weapons: how far each is worth firing (beyond it the pistol / chaingun spread and the
+# shotgun's pellets mostly miss, a fist does nothing) and what it fires. On the board the
+# marine emptied the pistol at an imp ~650 units away (`aim.on_target` said yes up to 700
+# whatever the weapon), Doom switched to the fist at 0 ammo, and since the fist's ammo
+# reads -1 `on_target` stayed true: it stood "holding fire" punching the air at 600
+# units while the imp's fireballs took it from 94 to dead.
+MELEE_WEAPONS = {"fist", "chainsaw"}
+WEAPON_RANGE = {"fist": 80, "chainsaw": 80, "pistol": 500, "chaingun": 600, "shotgun": 400,
+                "super_shotgun": 300, "rocket_launcher": 1500, "plasma_rifle": 1000, "bfg9000": 1000}
+WEAPON_AMMO = {"pistol": "bullets", "chaingun": "bullets", "shotgun": "shells",
+               "super_shotgun": "shells", "rocket_launcher": "rockets", "plasma_rifle": "cells",
+               "bfg9000": "cells"}
+WEAPON_SLOT = {"fist": 1, "chainsaw": 1, "pistol": 2, "shotgun": 3, "super_shotgun": 3,
+               "chaingun": 4, "rocket_launcher": 5, "plasma_rifle": 6, "bfg9000": 7}
+WEAPON_DESC = {
+    "fist": "Punch (reach ~80, weak). Only when every gun is out of ammo, and only up close.",
+    "chainsaw": "Melee (reach ~80), no ammo: a pinky / imp / zombie right in your face.",
+    "pistol": "Weak single shots, useful up to ~500. When nothing better has ammo.",
+    "shotgun": "Strong at short to medium range (< 400): the best all-round gun vs imps, "
+               "zombies, sergeants, pinkies.",
+    "super_shotgun": "Very strong up close (< 300): pinkies, imps, tough enemies near you.",
+    "chaingun": "Fast bullets, useful up to ~600: groups and tougher enemies; eats bullets.",
+    "rocket_launcher": "Huge damage at range. NEVER with an enemy closer than 160 (the blast "
+                       "hurts you too).",
+    "plasma_rifle": "Fast strong shots up to ~1000: tough enemies.",
+    "bfg9000": "Room clearer for a big fight.",
+}
+ROCKET_MIN_DIST = 160      # closer than this the rocket's blast hits the marine too
+ITEM_AMMO = {"clip": "bullets", "bullet_box": "bullets", "shells": "shells", "shell_box": "shells",
+             "rocket": "rockets", "rocket_box": "rockets", "cell": "cells", "cell_pack": "cells"}
+LOW_HEALTH = 50            # below this, health pickups are urgent
+LOW_AMMO = 20              # the current gun's ammo below this: ammo pickups are urgent
+DODGE_ETA = 20             # tics: a projectile reaching the marine sooner is dodged now
+PICKUP_NEAR = 300          # a pickup that is not urgent is worth a detour up to here
+ITEM_SAME = 48             # two sightings of a pickup this close are the same one
+# +1 bonuses: E1M1 is strewn with them, and once they showed on the map and in the
+# prompt the supervisor made "grab the armor bonus" the goal of 54 plans out of 61 (68%
+# of the moves went back over old ground, the exit was never found). Picked up only when
+# literally on the way; never a goal, not on the map.
+MINOR_ITEMS = {"health_bonus", "armor_bonus"}
+MINOR_NEAR = 128
+EXIT_SWITCH_NEAR = 512     # a switch this close to the EXIT sign is the exit switch
+EXIT_OVER_PICKUP_HP = 25   # with the exit switch known, pickups wait unless health is below this
+ITEM_GLYPH = {"health": "h", "ammo": "a", "weapon": "w", "key": "k", "armor": "r", "powerup": "p"}
+
+
+def ammo_of(obs, weapon):
+    """Ammo of a weapon from the status bar (None = melee, needs none)."""
+    t = WEAPON_AMMO.get(weapon)
+    if t is None:
+        return None
+    if "ammo_all" in obs:
+        return obs["ammo_all"].get(t, 0)
+    return obs["ammo"] if obs.get("weapon") == weapon else 0
+
+
+def usable_weapons(obs):
+    """Weapons owned that can fire now (melee always can)."""
+    owned = obs.get("weapons")
+    if owned is None:            # firmware without the status bar: only the current one is known
+        return [obs["weapon"]]
+    return [w for w in owned if w in MELEE_WEAPONS or (ammo_of(obs, w) or 0) > 0]
+
+
+def item_wanted(obs, item):
+    """Would walking over it give the marine anything now? (Doom leaves a medikit on the
+    floor at full health, ammo at the maximum.) What the status bar tells a player."""
+    name, kind = item["name"], item["kind"]
+    if kind == "health":
+        return name in ("health_bonus", "soulsphere", "megasphere") or obs["health"] < 100
+    if kind == "armor":
+        return name == "armor_bonus" or obs["armor"] < (200 if name == "blue_armor" else 100)
+    have, cap = obs.get("ammo_all") or {}, obs.get("ammo_max") or {}
+    if kind == "ammo":
+        t = ITEM_AMMO.get(name)
+        if t is None:
+            return True                  # backpack
+        owned = obs.get("weapons")
+        if owned is not None and not any(WEAPON_AMMO.get(w) == t for w in owned):
+            return False                 # shells without a shotgun: no use yet
+        return have.get(t, 0) < cap.get(t, 1)
+    if kind == "weapon":
+        t = WEAPON_AMMO.get(name)
+        return name not in (obs.get("weapons") or []) or (t is not None and have.get(t, 0) < cap.get(t, 1))
+    if kind == "key":
+        return name not in (obs.get("keys") or [])
+    return True                  # powerups
+
+
+def item_urgent(obs, item):
+    """Worth going for before the exit: a key (locked doors need it), a weapon not owned,
+    health while low, ammo while the guns are (nearly) dry."""
+    name, kind = item["name"], item["kind"]
+    if kind == "key":
+        return True
+    if kind == "weapon":
+        return name not in (obs.get("weapons") or [])
+    if kind == "health":
+        return obs["health"] < LOW_HEALTH
+    if kind == "ammo":
+        guns = [w for w in usable_weapons(obs) if w not in MELEE_WEAPONS]
+        cur = WEAPON_AMMO.get(obs["weapon"])
+        return not guns or name == "backpack" or \
+            (cur is not None and ITEM_AMMO.get(name) == cur and obs["ammo"] < LOW_AMMO)
+    return False
+
+
+def incoming_of(obs):
+    """The projectile in view that reaches the marine first (None = none coming)."""
+    hits = [m for m in obs.get("missiles", []) if m.get("incoming")]
+    if not hits:
+        return None
+    m = min(hits, key=lambda m: m.get("eta", 999))
+    return {"name": m["name"], "eta_tics": m.get("eta"), "dodge": m.get("dodge"),
+            "dist": m["dist"], "bearing": m["bearing"], "dz": m.get("dz", 0)}
+
 
 def level_of(obs):
     return f"E{obs.get('episode')}M{obs.get('map')}"
@@ -1279,7 +1628,12 @@ def note_door_attempt(obs, mem):
     if "use_target" in obs:
         # exact: the press hit the door (a key door without the key counts at once
         # as tried, so it is given up instead of pressed forever)
-        if not door or not (use_hits_door(obs) or obs.get("use_locked")):
+        # A press that hits nothing ("oof") while touching and facing the door counts
+        # too: a door that USE does not open (opened from elsewhere, or not a door at
+        # all). Not counting it, the marine at E1M2's start pressed USE on a "door" for
+        # 60 decisions without it ever becoming `wont_open`.
+        touching = door and door["dist"] <= 32 and abs(door["bearing"]) <= 25 and obs.get("use_target") is None
+        if not door or not (use_hits_door(obs) or obs.get("use_locked") or touching):
             return
     elif not (use_reaches(door, mem) and abs(door["bearing"]) <= 25):
         return
@@ -1415,17 +1769,27 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
     aim = None
     if enemies:
         tgt = min(enemies, key=lambda e: abs(e["bearing"]))
+        reach = WEAPON_RANGE.get(obs["weapon"], AIM_HOLD_DIST)
+        in_range = tgt["dist"] <= reach and \
+            not (obs["weapon"] == "rocket_launcher" and tgt["dist"] < ROCKET_MIN_DIST)
+        loaded = obs["weapon"] in MELEE_WEAPONS or obs["ammo"] > 0
         aim = {"enemy": tgt["name"], "bearing": tgt["bearing"], "dist": tgt["dist"],
-               "on_target": abs(tgt["bearing"]) <= AIM_CONE and tgt["dist"] <= AIM_HOLD_DIST
-                            and obs["ammo"] != 0}
+               "weapon_range": reach, "in_range": in_range,
+               "on_target": abs(tgt["bearing"]) <= AIM_CONE and in_range and loaded}
+    player = {
+        "health": obs["health"], "armor": obs["armor"],
+        "weapon": obs["weapon"], "ammo": obs["ammo"],
+        "heading": obs["angle"],
+        "level": f"E{obs['episode']}M{obs['map']}",
+    }
+    if "weapons" in obs:          # the status bar (firmware with items / missiles)
+        player["weapons"] = obs["weapons"]
+        player["ammo_all"] = {t: f"{n}/{obs.get('ammo_max', {}).get(t, '?')}"
+                              for t, n in obs.get("ammo_all", {}).items()}
+        player["keys"] = obs.get("keys", [])
     state = {
         "legend": STATE_LEGEND,
-        "player": {
-            "health": obs["health"], "armor": obs["armor"],
-            "weapon": obs["weapon"], "ammo": obs["ammo"],
-            "heading": obs["angle"],
-            "level": f"E{obs['episode']}M{obs['map']}",
-        },
+        "player": player,
         "view": view_of(obs, sectors, openings, ahead, mem, rays_mode),
         "way_out": way_out(sectors, openings),
         "enemies_in_view": enemies,
@@ -1455,6 +1819,38 @@ def build_state(obs, mem, intent, map_win, rays_mode="auto"):
         seen = mem.exit_from_here(obs)
         if seen:
             state["exit_seen"] = seen
+    if obs.get("switch_ahead"):
+        state["switch_ahead"] = dict(obs["switch_ahead"])
+    else:
+        sw = mem.switch_from_here(obs)
+        if sw:
+            state["switch_seen"] = sw
+    # A switch next to the EXIT sign is the exit switch. On the board, inside E1M1's
+    # exit room, the hanging sign (one side) and the switch (the other) pulled Jev
+    # left / right for 50 steps; once the switch is known the sign is only a marker.
+    es, ss = mem.exit_seen, mem.switch_seen
+    exit_switch = bool(es and ss and es["level"] == ss["level"] == (obs.get("episode"), obs.get("map"))
+                       and math.hypot(es["x"] - ss["x"], es["y"] - ss["y"]) <= EXIT_SWITCH_NEAR)
+    if exit_switch:
+        (state.get("switch_ahead") or state.get("switch_seen") or {})["exit"] = True
+        state.pop("exit_sign", None)
+        state.pop("exit_seen", None)
+    shown =[i for i in obs.get("items", []) if i["name"] not in MINOR_ITEMS or i["dist"] <= MINOR_NEAR]
+    if shown:
+        state["items_in_view"] = [dict(i, wanted=item_wanted(obs, i)) for i in shown]
+    pk = mem.pickup(obs)
+    if pk and exit_switch and obs["health"] >= EXIT_OVER_PICKUP_HP:
+        pk = None       # the level ends a few steps away: no detours (it left the exit room for a medikit)
+    if pk:
+        state["pickup"] = pk
+    inc = incoming_of(obs)
+    if inc:
+        state["incoming"] = inc
+    if obs.get("hurt"):
+        state["hurt"] = obs["hurt"]
+    if obs.get("missiles"):
+        state["missiles_in_view"] = [{"name": m["name"], "dist": m["dist"], "bearing": m["bearing"],
+                                      "incoming": bool(m.get("incoming"))} for m in obs["missiles"]]
     fl = floor_of(obs)
     if fl:
         state["floor"] = fl
@@ -1641,6 +2037,11 @@ SUPERVISOR_SYSTEM = (
     "through first (e.g. the gap in a wall line on the map), or null while it is stuck "
     "so it can get free locally. Barrels are hazards, not targets: never tell the "
     "reflexes to shoot barrels or walk into them, only to go around them. "
+    "A level ends when the marine presses its exit switch: an EXIT sign marks the way "
+    "(above the exit door, or hanging in the exit room), and the switch is in the room "
+    "behind it, often on a side wall, not under the sign. 'S' on the map = a switch the "
+    "marine saw and has not flipped: once the marine is in or near the exit room, the "
+    "goal is to press that switch (walk up to it, use). "
     "Map glyphs: '#' = wall (also a closed door or a ledge too high to climb), ':' = a "
     "step edge the marine CAN walk over (rows of ':' = stairs: a way up, not a wall), "
     "'~' = the edge of a damaging floor (nukage/slime: about 5-10 health per second "
@@ -1656,13 +2057,27 @@ SUPERVISOR_SYSTEM = (
     "(the edge between '.' and ' ' is the frontier); do not send the marine back over "
     "'.' ground unless it is the only way to unexplored space or to an 'E'. Keep a heading while it "
     "still leads to new ground: changing it every plan makes the marine wander. "
+    "Pickups the marine saw and that are still there are on the map too: 'h' health, "
+    "'a' ammo, 'w' weapon, 'k' key, 'r' armor, 'p' powerup (it is picked up by walking "
+    "over it). Priorities: 1) stay alive: health pickups when health is under ~50, never "
+    "fight without a gun that has ammo (go for ammo, or keep out of the enemy's sight), "
+    "the reflexes dodge fireballs themselves; 2) once an exit is known, get there "
+    "quickly (fetch a key first if a door on the way needs one); 3) on the way pick up "
+    "what helps - ammo when low, a weapon not owned (a shotgun is a big upgrade), armor, "
+    "health - with a short detour, a long one only when urgent. Exploring toward the exit "
+    "is the job: a goal is about where to go; never make collecting pickups the goal "
+    "unless one is urgent (health under ~50, out of ammo, a key, a weapon not owned) - "
+    "the reflexes grab what lies on the way by themselves. Health / armor bonuses (+1) "
+    "are never worth a detour (they are not even listed). preferred_weapon must be "
+    "one of the weapons owned (status bar) with ammo. "
     "Respond with ONLY a JSON object, no prose, with keys: "
     "goal (string, <= 160 chars, imperative, what the reflexes should do now, e.g. "
     "'Head east along the corridor, open the door at its end, then clear the room'), "
     "target_heading (integer 0-359 or null: the compass direction to travel to reach "
     "unexplored space or the objective; null if the reflexes should just react locally), "
     "fire_policy ('aggressive' | 'normal' | 'conservative'), "
-    "preferred_weapon (integer 1-7 or null; 2 pistol, 3 shotgun, 4 chaingun), "
+    "preferred_weapon (integer 1-7 or null; 1 fist/chainsaw, 2 pistol, 3 shotgun, 4 chaingun, "
+    "5 rocket launcher, 6 plasma, 7 BFG; only a weapon owned with ammo), "
     "note (string, <= 120 chars: your reasoning in one line)."
 )
 
@@ -1782,11 +2197,33 @@ class Supervisor(threading.Thread):
             f"Replan trigger: {why}.",
             f"Player: health {obs['health']}, armor {obs['armor']}, weapon {obs['weapon']}, ammo {obs['ammo']}, "
             f"level E{obs['episode']}M{obs['map']}, position ({obs['x']},{obs['y']}), heading {obs['angle']} deg.",
+            ("Status bar: weapons owned " + ", ".join(obs["weapons"]) + "; ammo " +
+             ", ".join(f"{t} {n}/{obs.get('ammo_max', {}).get(t, '?')}" for t, n in obs.get("ammo_all", {}).items()) +
+             "; keys " + (", ".join(obs.get("keys") or []) or "none") + ".") if "weapons" in obs else
+            "Status bar: (this firmware does not report weapons / keys).",
+            "Pickups in view (bonuses left out): " + (
+                ", ".join(f"{i['name']} ({i['kind']}) dist {i['dist']} bearing {i['bearing']}"
+                          for i in obs.get("items", []) if i["name"] not in MINOR_ITEMS) or "none") + ".",
+            "Pickups remembered (seen, still there as far as known; from the marine now): " + (
+                ", ".join(f"{i['name']} bearing {i['bearing']} dist {i['dist']}"
+                          f"{' WANTED' if i['wanted'] else ' (no use now)'}{' URGENT' if i['urgent'] else ''}"
+                          for i in mem.get("items", [])[:8]) or "none") + ".",
+            ("Hit since the last step: -%d health, from %s." % (obs["hurt"]["amount"], obs["hurt"].get("from") or "no attacker (floor)")
+             if obs.get("hurt") else "Not being hit right now."),
+            "Projectiles in view: " +(", ".join(f"{m['name']} dist {m['dist']} bearing {m['bearing']}"
+                                                 f"{' INCOMING' if m.get('incoming') else ''}"
+                                                 for m in obs.get("missiles", [])) or "none") + ".",
             "View depth by sector (min/max dist): " + ", ".join(
                 f"{s['sector']} {s['min_dist']}/{s['max_dist']}" for s in sectors) + ".",
             "Openings in view: " + (", ".join(f"bearing {o['bearing']} dist {o['dist']}" for o in openings) or "none") + ".",
             "Enemies in view: " + (", ".join(f"{e['name']} dist {e['dist']} bearing {e['bearing']}"
                                             for e in obs.get("visible", [])) or "none") + ".",
+            "Switch not flipped yet: " + (
+                f"in view at bearing {obs['switch_ahead']['bearing']} dist {obs['switch_ahead']['dist']}"
+                if obs.get("switch_ahead") else
+                (f"seen earlier, now at bearing {mem['switch_seen']['bearing']} dist {mem['switch_seen']['dist']}"
+                 if mem.get("switch_seen") else "none seen") +
+                " (the level ends at a switch; behind an EXIT door it is the exit)") + ".",
             "Exit sign: " + (f"in view at bearing {obs['exit_sign']['bearing']} dist {obs['exit_sign']['dist']}"
                              if obs.get("exit_sign") else
                              (f"seen earlier, now at bearing {mem['exit_seen']['bearing']} dist "
@@ -1869,6 +2306,11 @@ class Supervisor(threading.Thread):
         """No LLM: point the reflexes toward the least-explored direction on the
         automap (the compass ray that runs farthest through unknown cells)."""
         m = snap["map"]
+        sw = snap["mem"].get("switch_seen") or snap["obs"].get("switch_ahead")
+        if sw and sw["dist"] <= 800:
+            heading = round((snap["obs"]["angle"] + sw["bearing"]) % 360)
+            return Intent(f"Press the switch {compass_name(heading)} (heading {heading}, {sw['dist']} units): "
+                          f"walk up to it and use it.", heading, "normal", None, "switch seen", "dry")
         ex = snap["mem"].get("exit_seen")
         if ex:
             # an EXIT sign was seen: that is where the level ends
@@ -1876,6 +2318,12 @@ class Supervisor(threading.Thread):
             return Intent(f"Go to the EXIT sign seen {compass_name(heading)} (heading {heading}, "
                           f"{ex['dist']} units): open the door there and press the switch.",
                           heading, "normal", None, "exit sign seen", "dry")
+        urgent = [i for i in snap["mem"].get("items", []) if i["wanted"] and i["urgent"]]
+        if urgent:
+            i = urgent[0]
+            heading = round((snap["obs"]["angle"] + i["bearing"]) % 360)
+            return Intent(f"Get the {i['name']} {compass_name(heading)} (heading {heading}, {i['dist']} units): "
+                          f"walk over it.", heading, "normal", None, "urgent pickup", "dry")
         if not m or not m.get("valid"):
             return Intent(DEFAULT_INTENT.goal, None, "normal", None, "no map yet", "dry")
         grid = m["grid"]
@@ -1912,6 +2360,18 @@ def trajectory_summary_from_snap(snap):
 def compass_name(h):
     names = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"]
     return names[int(((h % 360) + 22.5) // 45) % 8]
+
+
+def board_audio_status(args):
+    """The board's audio state from its settings API (firmware v0.6.3+), for a demo with
+    no serial console. None if the board (or the simulator) does not report it."""
+    if args.ws_url:
+        return None
+    try:
+        with urllib.request.urlopen(f"http://{args.host}:{args.port}/api/settings", timeout=2) as resp:
+            return json.loads(resp.read().decode()).get("audio_status")
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
 
 
 def http_json(req, timeout):
@@ -1966,6 +2426,10 @@ class SharedState:
             "map": mem.map_with_visits(map_json, obs),
             "mem": {
                 "exit_seen": mem.exit_from_here(obs),
+                "switch_seen": mem.switch_from_here(obs),
+                "items": [dict(i, wanted=item_wanted(obs, i), urgent=item_urgent(obs, i))
+                          for i in mem.items_from_here(obs)
+                          if i["name"] not in MINOR_ITEMS] if obs.get("valid") else [],
                 "explore": mem.explore(obs) if obs.get("valid") else None,
                 "walked_cells": len(mem.visited.get((obs.get("episode"), obs.get("map")), ())),
                 "consecutive_blocked": mem.consecutive_blocked,
@@ -2318,6 +2782,9 @@ def run(args):
             f"pacing={'realtime (free-running)' if args.realtime else 'lockstep'}")
         say(f"player at ({obs['x']},{obs['y']}) heading {obs['angle']} E{obs['episode']}M{obs['map']} "
             f"hp={obs['health']} weapon={obs['weapon']} ammo={obs['ammo']}")
+        audio = board_audio_status(args)
+        if audio:
+            say(f"board audio: {audio}" if audio.startswith("ok") else c(f"board audio: {audio}", "yel"))
         if not args.quiet:
             say(c("  line: ", "dim") + radar_key())
 
@@ -2383,7 +2850,7 @@ def run(args):
                     # ---- decide (Jev) ------------------------------------------------
                     map_win = map_window(mem.map_with_visits(map_json, obs)) if map_json else None
                     state = build_state(obs, mem, intent, map_win, args.view_rays)
-                    questions = build_questions(intent)
+                    questions = build_questions(intent, obs)
                     t0 = time.perf_counter()
                     if jev_retry_at and time.time() < jev_retry_at:
                         answers, usage = dry_fallback.decide(state, questions)
@@ -2560,10 +3027,32 @@ def run(args):
                             (mem.game_tics - mem.last_use_tic) < args.use_cooldown:
                         macro = "wait"
                         flags.append("door-wait")
+                    # - USE on a door that is already open shuts it (Doom toggles it): on the
+                    #   board the marine kept closing the open exit door. Walk through instead.
+                    if mech and macro == "use" and obs.get("use_target") == "open_door":
+                        macro = "forward"
+                        mem.heuristic_overrides += 1
+                        flags.append("open-door")
+                    # - a projectile about to hit (incoming, eta <= DODGE_ETA tics): sidestep
+                    #   off its line. A reflex on what is on screen, like a player's.
+                    inc = incoming_of(obs)
+                    if mech and inc and (inc["eta_tics"] or 0) <= DODGE_ETA and inc.get("dodge") and \
+                            macro not in ("strafe_left", "strafe_right"):
+                        macro = f"strafe_{inc['dodge']}"
+                        mem.heuristic_overrides += 1
+                        flags.append("dodge")
 
+                # weapon: Jev's pick (only weapons owned with ammo are offered), else the
+                # supervisor's preference once it names one the marine has and can fire
                 weapon = None
-                if system_macro is None and intent.preferred_weapon and \
-                        intent.preferred_weapon != mem.last_weapon_applied:
+                pick = ((answers or {}).get("weapon") or {}).get("choice") if system_macro is None else None
+                usable = usable_weapons(obs)
+                if pick in WEAPON_SLOT and pick != obs["weapon"] and pick in usable:
+                    weapon = WEAPON_SLOT[pick]
+                    flags.append(f"weapon={pick}")
+                elif system_macro is None and intent.preferred_weapon and \
+                        intent.preferred_weapon != mem.last_weapon_applied and \
+                        any(WEAPON_SLOT[w] == intent.preferred_weapon for w in usable if w in WEAPON_SLOT):
                     weapon = intent.preferred_weapon
                     mem.last_weapon_applied = weapon
                     flags.append(f"weapon={weapon}")
@@ -2614,7 +3103,14 @@ def run(args):
                 # frozen-game detector: nothing at all changed although we pressed something.
                 # A straight move that came back `blocked` proves nothing (walking into a
                 # wall or a barrel changes nothing either): only turns, USE, etc. count.
-                same = all(new_obs.get(k) == obs.get(k) for k in ("x", "y", "angle", "health", "ammo", "armor"))
+                # The whole view counts, not just the marine: standing still at the exit
+                # door, the old x/y/angle/health check called the game frozen, and the
+                # "unfreeze" USE presses then reversed the moving door every other step
+                # (open, shut, open...) for minutes. A door moving, a monster walking or a
+                # fireball flying changes the view; a paused game or a stats screen does not.
+                same = all(new_obs.get(k) == obs.get(k) for k in
+                           ("x", "y", "angle", "health", "ammo", "armor", "walls", "door_ahead",
+                            "visible", "items", "missiles", "use_target"))
                 pushing = new_obs.get("blocked") and macro in STRAIGHT_MOVES
                 if same and macro != "wait" and not pushing:
                     mem.frozen_steps += 1
