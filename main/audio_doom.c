@@ -27,13 +27,16 @@
 #define DOOM_AUDIO_FIXED_SHIFT 16
 #define DOOM_AUDIO_VOLUME_SCALE 160
 
+/* Wiring (README "Audio wiring"): 40-pin header pin -> EchoBase pin. The EchoBase
+ * names its data pins from the codec's side: our DOUT goes to its DIN (ES8311
+ * DSDIN); its DOUT is the microphone (ASDOUT) and stays unconnected. */
 #define JC_AUDIO_I2C_PORT I2C_NUM_0
-#define JC_AUDIO_I2C_SDA GPIO_NUM_7
-#define JC_AUDIO_I2C_SCL GPIO_NUM_8
+#define JC_AUDIO_I2C_SDA GPIO_NUM_7      /* header 23 -> SDA */
+#define JC_AUDIO_I2C_SCL GPIO_NUM_8      /* header 29 -> SCL */
 #define JC_AUDIO_I2S_PORT I2S_NUM_0
-#define JC_AUDIO_I2S_BCLK GPIO_NUM_12
-#define JC_AUDIO_I2S_LRCLK GPIO_NUM_6
-#define JC_AUDIO_I2S_DOUT GPIO_NUM_9
+#define JC_AUDIO_I2S_BCLK GPIO_NUM_12    /* header 27 (ID_SD) -> SCK */
+#define JC_AUDIO_I2S_LRCLK GPIO_NUM_6    /* header 21 -> LRCK */
+#define JC_AUDIO_I2S_DOUT GPIO_NUM_9     /* header 35 -> DIN (not DOUT) */
 #define JC_AUDIO_ES8311_ADDR ES8311_CODEC_DEFAULT_ADDR
 #define JC_AUDIO_MCLK_MULTIPLE 256
 

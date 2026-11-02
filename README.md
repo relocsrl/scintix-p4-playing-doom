@@ -145,24 +145,36 @@ Together these bring the game to a steady **~30 FPS** — Doom's own software re
 - WAD shipped in SPIFFS (shareware `doom1.wad`, forked from
   [Akbar30Bill/DOOM_wads](https://github.com/Akbar30Bill/DOOM_wads)).
 
-## Audio wiring (SCINTIX P4 on a Raspberry Pi CM5 IO Board)
+## Audio wiring (SCINTIX P4 on a Raspberry Pi CM4/CM5 IO Board)
 
-The SCINTIX P4 (RM-CMP4) module sits on a **Raspberry Pi CM5 IO Board**, so the
+The SCINTIX P4 (RM-CMP4) module sits on a **Raspberry Pi CM4 or CM5 IO Board**, so the
 ESP32-P4 GPIOs surface on the board's **40-pin header** under the Raspberry Pi pin
-names. To attach an external **ES8311** audio module (e.g. the
-[M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase)), wire:
+names (the mapping comes from the module's CM connector, so it is the same on both
+boards). To attach an external **ES8311** audio module, e.g. the
+[M5 Atomic EchoBase](https://github.com/m5stack/M5Atomic-EchoBase) (now sold as
+*Atomic Voice Base*, SKU A149), wire:
 
-| Signal | ESP32-P4 GPIO | CM5 IO 40-pin (RPi) |
-|---|---|---|
-| I²C **SDA** (codec + expander) | GPIO7 | **GPIO11** |
-| I²C **SCL** | GPIO8 | **GPIO5** |
-| I²S **BCLK** | GPIO12 | **ID_SD** |
-| I²S **WS / LRCK** | GPIO6 | **GPIO9** |
-| I²S **DOUT** (→ codec) | GPIO9 | **GPIO19** |
+| Signal | ESP32-P4 GPIO | 40-pin header (RPi name) | EchoBase pin | ES8311 |
+|---|---|---|---|---|
+| I²C **SDA** (codec + expander) | GPIO7 | **23** (GPIO11) | SDA (4) | CDATA |
+| I²C **SCL** | GPIO8 | **29** (GPIO5) | SCL (2) | CCLK |
+| I²S **BCLK** | GPIO12 | **27** (ID_SD) | SCK (9) | SCLK |
+| I²S **WS / LRCK** | GPIO6 | **21** (GPIO9) | LRCK (5) | LRCK |
+| I²S **data out** (P4 → codec) | GPIO9 | **35** (GPIO19) | **DIN (3)** | DSDIN |
+| 3.3 V | — | **1** or **17** | 3V3 (1) | |
+| GND | — | **39** (or 6/9/14/20/25/30/34) | GND (8) | |
 
-**Power & ground** (40-pin header): the **display** runs at **5V** (pin **2** or **4**);
-the **ES8311 module** (M5 EchoBase) runs at **3.3V** (pin **1** or **17**); **GND** on
-pin **39** (or any other ground pin: 6/9/14/20/25/30/34).
+> ⚠️ **DIN, not DOUT.** The EchoBase pins are named from the **codec's** side: `DIN`
+> (pin 3) is the codec's data input (ES8311 DSDIN), `DOUT` (pin 7) is the microphone
+> data coming *out* of the codec (ASDOUT). The P4's I²S data **output** goes to the
+> EchoBase **`DIN`**; leave `DOUT` unconnected (no microphone here). Wired to `DOUT` by
+> mistake, the codec's input floats and the speaker only crackles. (M5's Arduino library
+> names the same signals from the Atom's side, e.g. `5 /*I2S DOUT*/` on AtomS3, which is
+> where the confusion comes from.)
+
+**Power** (40-pin header): the **display** runs at **5V** (pin **2** or **4**); the
+**ES8311 module** (M5 EchoBase) runs at **3.3V** (pin **1** or **17**). Keep the I²S
+wires short and share a ground close to them.
 
 The ES8311 (`0x18`) and the EchoBase PI4IOE5V6408 I/O expander (`0x43`) share that I²C
 bus; **no external MCLK** is required (the codec clocks off SCLK). For reference, the
