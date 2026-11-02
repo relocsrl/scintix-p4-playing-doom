@@ -56,6 +56,8 @@
  * game goes silent until a reboot. Every AUDIO_HEALTH_PERIOD_MS read back one
  * register of each and re-initialize what lost its setup. */
 #define AUDIO_HEALTH_PERIOD_MS 2000
+#define AUDIO_BOOT_TRIES 10       /* at boot: tries to find the codec... */
+#define AUDIO_BOOT_RETRY_MS 300   /* ...this far apart (~3 s in all) */
 #define ES8311_I2C_ADDR_7BIT (JC_AUDIO_ES8311_ADDR >> 1) /* esp_codec_dev takes the 8-bit form */
 #define ES8311_REG00 0x00
 #define ES8311_REG00_CSM_ON 0x80 /* set by the driver once configured; 0x1F after a reset */
@@ -115,6 +117,19 @@ static uint8_t s_audio_volume = DOOM_AUDIO_DEFAULT_VOLUME;
 static uint8_t clamp_volume(uint8_t volume)
 {
     return volume > DOOM_AUDIO_MAX_VOLUME ? DOOM_AUDIO_MAX_VOLUME : volume;
+}
+
+/* Human-readable audio state for the settings page / API (no serial log at a demo). */
+static char s_audio_status[112] = "starting";
+
+static void set_audio_status(const char *text)
+{
+    strlcpy(s_audio_status, text, sizeof(s_audio_status));
+}
+
+const char *doom_audio_status(void)
+{
+    return s_audio_status;
 }
 
 uint8_t doom_audio_get_volume(void)
@@ -368,8 +383,6 @@ static esp_err_t init_codec(void)
     s_codec_gpio_if = audio_codec_new_gpio();
     ESP_RETURN_ON_FALSE(s_codec_gpio_if != NULL, ESP_FAIL, TAG, "codec GPIO init failed");
 
-    ESP_RETURN_ON_ERROR(codec_open(), TAG, "codec open failed");
-
     /* A second handle on the codec address for plain register reads (the health
      * check), so a missing EchoBase does not flood the log through esp_codec_dev. */
     i2c_device_config_t reg_cfg = {
@@ -381,9 +394,52 @@ static esp_err_t init_codec(void)
         s_codec_reg_dev = NULL;
     }
 
+    /* The EchoBase may answer late (powering up with the board) or not at all
+     * (unplugged): try for a few seconds, probing quietly first. Without it the
+     * game still starts, silent, with the mixer paused; the health task sets the
+     * codec up as soon as it answers. Before, a codec missing at boot meant no
+     * sound until a reboot even after plugging it in. */
+    bool opened = false;
+    for (int i = 0; i < AUDIO_BOOT_TRIES && !opened; i++) {
+        if (i > 0) {
+            vTaskDelay(pdMS_TO_TICKS(AUDIO_BOOT_RETRY_MS));
+        }
+        if (i2c_master_probe(s_i2c_bus, ES8311_I2C_ADDR_7BIT, 50) != ESP_OK) {
+            continue;
+        }
+        if (codec_open() == ESP_OK) {
+            opened = true;
+        } else {
+            codec_close();
+        }
+    }
+    if (!opened) {
+        ESP_LOGW(TAG, "ES8311 not answering after %d tries over %d ms (EchoBase unplugged?): "
+                      "starting silent, audio comes up when it answers (checked every %d s)",
+                 AUDIO_BOOT_TRIES, AUDIO_BOOT_TRIES * AUDIO_BOOT_RETRY_MS, AUDIO_HEALTH_PERIOD_MS / 1000);
+        /* What does answer on the bus: nothing = wiring / power / pull-ups; the
+         * expander (0x43) but not the codec (0x18) = the codec itself. */
+        char found[96] = "";
+        int len = 0;
+        for (uint16_t a = 0x08; a < 0x78 && len < (int)sizeof(found) - 6; a++) {
+            if (i2c_master_probe(s_i2c_bus, a, 20) == ESP_OK) {
+                len += snprintf(found + len, sizeof(found) - len, " 0x%02x", a);
+            }
+        }
+        ESP_LOGW(TAG, "I2C bus scan (SDA GPIO%d, SCL GPIO%d):%s", JC_AUDIO_I2C_SDA, JC_AUDIO_I2C_SCL,
+                 len ? found : " no device answers (wiring, 3.3 V / GND, pull-ups?)");
+        char status[112];
+        snprintf(status, sizeof(status), "ES8311 not answering since boot (I2C bus:%s); retrying every %d s",
+                 len ? found : " nothing", AUDIO_HEALTH_PERIOD_MS / 1000);
+        set_audio_status(status);
+        s_audio_hold = true; /* the mixer must not write to the unopened I2S channel */
+        return ESP_OK;
+    }
+
     /* Unmute the EchoBase speaker amp via its I/O expander (same I2C bus). */
     s_has_ioexp = i2c_master_probe(s_i2c_bus, ECHOBASE_IOEXP_ADDR, 50) == ESP_OK;
     echobase_unmute();
+    set_audio_status(s_has_ioexp ? "ok" : "ok (codec answers, EchoBase amp expander not found)");
     return ESP_OK;
 }
 
@@ -407,6 +463,7 @@ static bool codec_recover(void)
     xSemaphoreGive(s_codec_mutex);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Codec re-init failed: %s (retrying)", esp_err_to_name(err));
+        set_audio_status("ES8311 answers but its setup failed; retrying");
         return false;
     }
     s_audio_hold = false;
@@ -424,6 +481,7 @@ static void audio_health_task(void *arg)
             if (!absent) {
                 ESP_LOGW(TAG, "Audio module not answering on I2C (unplugged / no power?); "
                               "it will be set up again when it is back");
+                set_audio_status("audio module not answering on I2C (unplugged / no power?); retrying");
                 absent = true;
             }
             continue;
@@ -440,7 +498,10 @@ static void audio_health_task(void *arg)
                      reg00, absent ? ", was not answering" : "");
             if (codec_recover()) {
                 ESP_LOGI(TAG, "Audio module back");
+                set_audio_status("ok (recovered)");
             }
+            /* the expander too (it may have been missing at boot) */
+            s_has_ioexp = i2c_master_probe(s_i2c_bus, ECHOBASE_IOEXP_ADDR, 50) == ESP_OK;
             ioexp_lost = s_has_ioexp;
         }
         if (ioexp_lost) {
@@ -615,7 +676,9 @@ static boolean init_sound(boolean use_sfx_prefix)
         return false;
     }
 
-    write_boot_tone();
+    if (!s_audio_hold) {
+        write_boot_tone();  /* not with the codec missing: the I2S channel is not open */
+    }
 
     BaseType_t created = xTaskCreatePinnedToCore(audio_task, "doom_audio", 4096, NULL,
                                                 tskIDLE_PRIORITY + 2, &s_audio_task, 0);
@@ -629,7 +692,11 @@ static boolean init_sound(boolean use_sfx_prefix)
     }
 
     s_sound_initialized = true;
-    ESP_LOGI(TAG, "Doom SFX audio ready: ES8311 I2S %u Hz", DOOM_AUDIO_SAMPLE_RATE);
+    if (s_audio_hold) {
+        ESP_LOGW(TAG, "Doom SFX audio waiting for the ES8311 (silent until it answers)");
+    } else {
+        ESP_LOGI(TAG, "Doom SFX audio ready: ES8311 I2S %u Hz", DOOM_AUDIO_SAMPLE_RATE);
+    }
     return true;
 }
 

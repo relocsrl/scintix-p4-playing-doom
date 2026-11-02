@@ -588,6 +588,67 @@ static const char *name_for_type(mobjtype_t type)
     }
 }
 
+/* Pickups the player can see lying around: what it is and what it is for. */
+static bool item_for_type(mobjtype_t type, const char **name, const char **kind)
+{
+    switch (type) {
+    case MT_MISC2:  *name = "health_bonus";    *kind = "health";  return true;
+    case MT_MISC10: *name = "stimpack";        *kind = "health";  return true;
+    case MT_MISC11: *name = "medikit";         *kind = "health";  return true;
+    case MT_MISC12: *name = "soulsphere";      *kind = "health";  return true;
+    case MT_MEGA:   *name = "megasphere";      *kind = "health";  return true;
+    case MT_MISC0:  *name = "green_armor";     *kind = "armor";   return true;
+    case MT_MISC1:  *name = "blue_armor";      *kind = "armor";   return true;
+    case MT_MISC3:  *name = "armor_bonus";     *kind = "armor";   return true;
+    case MT_MISC4:  *name = "blue_keycard";    *kind = "key";     return true;
+    case MT_MISC5:  *name = "red_keycard";     *kind = "key";     return true;
+    case MT_MISC6:  *name = "yellow_keycard";  *kind = "key";     return true;
+    case MT_MISC7:  *name = "yellow_skullkey"; *kind = "key";     return true;
+    case MT_MISC8:  *name = "red_skullkey";    *kind = "key";     return true;
+    case MT_MISC9:  *name = "blue_skullkey";   *kind = "key";     return true;
+    case MT_INV:    *name = "invulnerability"; *kind = "powerup"; return true;
+    case MT_MISC13: *name = "berserk";         *kind = "powerup"; return true;
+    case MT_INS:    *name = "invisibility";    *kind = "powerup"; return true;
+    case MT_MISC14: *name = "radsuit";         *kind = "powerup"; return true;
+    case MT_MISC15: *name = "computer_map";    *kind = "powerup"; return true;
+    case MT_MISC16: *name = "light_amp";       *kind = "powerup"; return true;
+    case MT_CLIP:   *name = "clip";            *kind = "ammo";    return true;
+    case MT_MISC17: *name = "bullet_box";      *kind = "ammo";    return true;
+    case MT_MISC18: *name = "rocket";          *kind = "ammo";    return true;
+    case MT_MISC19: *name = "rocket_box";      *kind = "ammo";    return true;
+    case MT_MISC20: *name = "cell";            *kind = "ammo";    return true;
+    case MT_MISC21: *name = "cell_pack";       *kind = "ammo";    return true;
+    case MT_MISC22: *name = "shells";          *kind = "ammo";    return true;
+    case MT_MISC23: *name = "shell_box";       *kind = "ammo";    return true;
+    case MT_MISC24: *name = "backpack";        *kind = "ammo";    return true;
+    case MT_MISC25: *name = "bfg9000";         *kind = "weapon";  return true;
+    case MT_CHAINGUN: *name = "chaingun";      *kind = "weapon";  return true;
+    case MT_MISC26: *name = "chainsaw";        *kind = "weapon";  return true;
+    case MT_MISC27: *name = "rocket_launcher"; *kind = "weapon";  return true;
+    case MT_MISC28: *name = "plasma_rifle";    *kind = "weapon";  return true;
+    case MT_SHOTGUN: *name = "shotgun";        *kind = "weapon";  return true;
+    case MT_SUPERSHOTGUN: *name = "super_shotgun"; *kind = "weapon"; return true;
+    default:        return false;
+    }
+}
+
+static const char *missile_name(mobjtype_t type)
+{
+    switch (type) {
+    case MT_TROOPSHOT:    return "imp_fireball";
+    case MT_HEADSHOT:     return "caco_fireball";
+    case MT_BRUISERSHOT:  return "baron_fireball";
+    case MT_TRACER:       return "revenant_rocket";
+    case MT_FATSHOT:      return "mancubus_ball";
+    case MT_ARACHPLAZ:    return "arach_plasma";
+    case MT_SPAWNSHOT:    return "brain_cube";
+    case MT_ROCKET:       return "rocket";
+    case MT_PLASMA:       return "plasma";
+    case MT_BFG:          return "bfg_ball";
+    default:              return "projectile";
+    }
+}
+
 static const char *weapon_name(weapontype_t w)
 {
     switch (w) {
@@ -708,6 +769,15 @@ static void agent_probe_use(const player_t *pl, mobj_t *pm, doom_agent_obs_t *o)
         return;
     }
     o->use_target = agent_use_kind(s_use_line->special);
+    /* A door already open (the player sees through it): USE would close it again.
+     * On the board the agent kept pressing USE on the open exit door and shut it
+     * every time. */
+    if (o->use_target != NULL && strcmp(o->use_target, "door") == 0 && s_use_line->backsector != NULL) {
+        P_LineOpening(s_use_line);
+        if (openrange >= pm->height) {
+            o->use_target = "open_door";
+        }
+    }
     switch (s_use_line->special) { /* key doors: without the key USE only says so */
     case 26: case 32:
         o->use_locked = !pl->cards[it_bluecard] && !pl->cards[it_blueskull];
@@ -762,6 +832,30 @@ static boolean agent_line_shows_exit(line_t *li)
            agent_is_exit_tex(sd->bottomtexture);
 }
 
+/* Switches: the facing side of the wall shows a switch panel not flipped yet (an
+ * SW1* texture of Doom's switch list; flipped it turns to SW2*). What a player
+ * sees on the wall — E1M1's exit switch has no EXIT on it, it is the plain switch
+ * in the room behind the EXIT door. */
+#define AGENT_SWITCH_RANGE 1024
+extern int switchlist[];
+extern int numswitches;
+
+static boolean agent_line_shows_switch(const mobj_t *pm, line_t *li)
+{
+    int side = P_PointOnLineSide(pm->x, pm->y, li);
+    if (li->sidenum[side] < 0) {
+        return false;
+    }
+    const side_t *sd = &sides[li->sidenum[side]];
+    for (int i = 0; i < numswitches * 2; i += 2) {
+        int t = switchlist[i];
+        if (t > 0 && (t == sd->toptexture || t == sd->midtexture || t == sd->bottomtexture)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Remember which lines showed an EXIT sign (reset on a new level), for the map. */
 static void agent_note_exit_seen(const line_t *li)
 {
@@ -799,14 +893,20 @@ static boolean agent_ray_traverse(intercept_t *in)
                               ? li->frontsector->ceilingheight : li->backsector->ceilingheight;
         fixed_t openbottom = li->frontsector->floorheight > li->backsector->floorheight
                                  ? li->frontsector->floorheight : li->backsector->floorheight;
+        /* The sector on the far side of the line (trace = this ray's divline). */
+        sector_t *farsec = P_PointOnLineSide(trace.x, trace.y, li) ? li->frontsector : li->backsector;
         blocking = (opentop - openbottom) < (56 << FRACBITS); /* closed/too low to pass */
-        is_door = blocking; /* a two-sided line, passable in principle, currently shut = a door */
+        /* A door = a two-sided line whose far sector is itself shut (a door sector's
+         * ceiling comes down to its floor), or a manual door line. Not a raised ledge
+         * under a low lintel: at E1M2's start a 32-unit step with a computer-panel
+         * grating read as a "door" and the agent pressed USE on it for minutes. */
+        const char *kind = agent_use_kind(li->special);
+        is_door = blocking && (farsec->ceilingheight - farsec->floorheight < (56 << FRACBITS) ||
+                               (kind != NULL && strcmp(kind, "door") == 0));
         if (!blocking) {
-            /* The sector on the far side of the line (trace = this ray's divline). A
-             * step up of more than 24 units cannot be walked (P_TryMove), so it is a
+            /* A step up of more than 24 units cannot be walked (P_TryMove), so it is a
              * wall for the marine even though the opening is tall enough; without
              * this the ray read "open" across a ledge and the agent pushed into it. */
-            sector_t *farsec = P_PointOnLineSide(trace.x, trace.y, li) ? li->frontsector : li->backsector;
             if (farsec->floorheight - s_ray_floor > (24 << FRACBITS)) {
                 blocking = true;
                 /* A raised lift: openable like a door (USE brings it down). */
@@ -880,6 +980,52 @@ static int agent_cast_ray(mobj_t *pm, int bearing_deg, boolean *is_door, boolean
     return out->dist;
 }
 
+#define AGENT_ITEM_RANGE 1024 /* pickups reported up to this far */
+
+/* A projectile in view: where it is and whether it is coming at the player.
+ * From its momentum, the closest approach to the player (in tics); it is
+ * `incoming` when that passes within both radii (+8) at a height the player's
+ * body occupies — a fireball lobbed from a ledge or a cacodemon above counts the
+ * same way. `dodge` = the sidestep (perpendicular to the facing) that moves the
+ * player away from its line. */
+static void agent_note_missile(mobj_t *pm, mobj_t *mo, int dist, int bearing, doom_agent_missile_t *m)
+{
+    strlcpy(m->name, missile_name(mo->type), sizeof(m->name));
+    m->dist = dist;
+    m->bearing_deg = bearing;
+    m->dz = (mo->z - pm->z) >> FRACBITS;
+    m->incoming = false;
+    m->eta_tics = 0;
+    m->dodge = NULL;
+    float px = (float)(mo->x - pm->x) / FRACUNIT, py = (float)(mo->y - pm->y) / FRACUNIT;
+    float vx = (float)mo->momx / FRACUNIT, vy = (float)mo->momy / FRACUNIT;
+    float vv = vx * vx + vy * vy;
+    if (vv < 0.01f) {
+        return;
+    }
+    float t = -(px * vx + py * vy) / vv;           /* tics to the closest approach */
+    if (t <= 0.0f) {
+        return;                                     /* flying away */
+    }
+    float cx = px + vx * t, cy = py + vy * t;       /* closest point, relative to the player */
+    float reach = (float)(pm->radius + mo->radius) / FRACUNIT + 8.0f;
+    if (cx * cx + cy * cy > reach * reach) {
+        return;                                     /* passes wide */
+    }
+    float z = ((float)mo->z + (float)mo->momz * t) / FRACUNIT;
+    float pz = (float)pm->z / FRACUNIT;
+    if (z > pz + (float)pm->height / FRACUNIT || z + (float)mo->height / FRACUNIT < pz) {
+        return;                                     /* goes over / under */
+    }
+    m->incoming = true;
+    m->eta_tics = (int)(t + 0.5f);
+    /* The player's right-hand direction (Doom angles grow counter-clockwise);
+     * stepping that way widens the gap when it points away from the closest point. */
+    unsigned fa = (pm->angle - ANG90) >> ANGLETOFINESHIFT;
+    float rx = (float)finecosine[fa] / FRACUNIT, ry = (float)finesine[fa] / FRACUNIT;
+    m->dodge = (rx * -cx + ry * -cy) > 0.0f ? "right" : "left";
+}
+
 /* Capture what the player can currently SEE into an observation. Runs on the
  * Doom task. Only things inside the rendered field of view and in line of sight
  * are reported (no enemies behind/occluded), with no targeting hints — the goal
@@ -912,13 +1058,46 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     o->floor_damage = agent_floor_damage(pm->subsector->sector);
     o->radsuit_tics = pl->powers[pw_ironfeet];
 
+    /* The status bar: weapons, keys, every ammo type. */
+    for (int w = 0; w < NUMWEAPONS && w < 32; w++) {
+        if (pl->weaponowned[w]) {
+            o->weapons_owned |= 1u << w;
+        }
+    }
+    for (int k = 0; k < NUMCARDS; k++) {
+        if (pl->cards[k]) {
+            o->keys_held |= 1u << k;
+        }
+    }
+    for (int a = 0; a < NUMAMMO && a < 4; a++) {
+        o->ammo_all[a] = pl->ammo[a];
+        o->ammo_max[a] = pl->maxammo[a];
+    }
+
+    /* Hit since the last observation? (same level and life: a respawn refills health) */
+    static int s_prev_health = -1;
+    static mobj_t *s_prev_mo;
+    if (s_prev_mo == pm && s_prev_health > pl->health) {
+        o->hurt_amount = s_prev_health - pl->health;
+    }
+    s_prev_health = pl->health;
+    s_prev_mo = pm;
+    bool attacker_alive = false;   /* pl->attacker is used only while it is still a live mobj */
+
     int n = 0;
-    for (thinker_t *th = thinkercap.next; th != &thinkercap && n < DOOM_AGENT_MAX_VISIBLE; th = th->next) {
+    for (thinker_t *th = thinkercap.next; th != &thinkercap; th = th->next) {
         if (th->function.acp1 != (actionf_p1)P_MobjThinker) {
             continue;
         }
         mobj_t *mo = (mobj_t *)th;
-        if (mo == pm || mo->health <= 0 || !(mo->flags & MF_SHOOTABLE)) {
+        if (mo == pl->attacker) {
+            attacker_alive = true;
+        }
+        const char *item_name = NULL, *item_kind = NULL;
+        bool shootable = mo != pm && mo->health > 0 && (mo->flags & MF_SHOOTABLE);
+        bool item = (mo->flags & MF_SPECIAL) && item_for_type(mo->type, &item_name, &item_kind);
+        bool missile = (mo->flags & MF_MISSILE) && mo->target != pm;
+        if (!shootable && !item && !missile) {
             continue;
         }
         /* In front, within the rendered field of view (+ = right of centre,
@@ -927,16 +1106,71 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         if (bearing < -AGENT_FOV_DEG || bearing > AGENT_FOV_DEG) {
             continue;
         }
+        int dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
+        if (item && dist > AGENT_ITEM_RANGE) {
+            continue;   /* a pickup further away is a few pixels on screen */
+        }
         /* ...and not hidden behind walls. */
         if (!P_CheckSight(pm, mo)) {
             continue;
         }
-        strlcpy(o->visible[n].name, name_for_type(mo->type), sizeof(o->visible[n].name));
-        o->visible[n].dist = P_AproxDistance(mo->x - pm->x, mo->y - pm->y) >> FRACBITS;
-        o->visible[n].bearing_deg = bearing;
-        n++;
+        if (shootable) {
+            if (n < DOOM_AGENT_MAX_VISIBLE) {
+                strlcpy(o->visible[n].name, name_for_type(mo->type), sizeof(o->visible[n].name));
+                o->visible[n].dist = dist;
+                o->visible[n].bearing_deg = bearing;
+                n++;
+            }
+        } else if (item) {
+            /* keep the nearest DOOM_AGENT_MAX_ITEMS: replace the farthest when full */
+            int slot = o->num_items;
+            if (slot >= DOOM_AGENT_MAX_ITEMS) {
+                slot = 0;
+                for (int i = 1; i < DOOM_AGENT_MAX_ITEMS; i++) {
+                    if (o->items[i].dist > o->items[slot].dist) {
+                        slot = i;
+                    }
+                }
+                if (o->items[slot].dist <= dist) {
+                    continue;
+                }
+            } else {
+                o->num_items++;
+            }
+            strlcpy(o->items[slot].name, item_name, sizeof(o->items[slot].name));
+            o->items[slot].kind = item_kind;
+            o->items[slot].dist = dist;
+            o->items[slot].bearing_deg = bearing;
+        } else if (o->num_missiles < DOOM_AGENT_MAX_MISSILES) {
+            agent_note_missile(pm, mo, dist, bearing, &o->missiles[o->num_missiles++]);
+        }
     }
     o->num_visible = n;
+    if ((o->hurt_amount > 0 || pl->damagecount > 0) && attacker_alive && pl->attacker != pm) {
+        int b = agent_bearing_to(pm, pl->attacker->x, pl->attacker->y);
+        int ab = b < 0 ? -b : b;
+        o->hurt_from = ab <= AGENT_FOV_DEG ? "ahead" : ab >= 135 ? "behind" : b < 0 ? "left" : "right";
+    }
+
+    /* Pickups and projectiles nearest first. */
+    for (int i = 1; i < o->num_items; i++) {
+        doom_agent_item_t t = o->items[i];
+        int j = i - 1;
+        while (j >= 0 && o->items[j].dist > t.dist) {
+            o->items[j + 1] = o->items[j];
+            j--;
+        }
+        o->items[j + 1] = t;
+    }
+    for (int i = 1; i < o->num_missiles; i++) {
+        doom_agent_missile_t t = o->missiles[i];
+        int j = i - 1;
+        while (j >= 0 && o->missiles[j].dist > t.dist) {
+            o->missiles[j + 1] = o->missiles[j];
+            j--;
+        }
+        o->missiles[j + 1] = t;
+    }
 
     /* Order left-to-right by bearing — the spatial layout on screen, not a priority. */
     for (int i = 1; i < n; i++) {
@@ -960,6 +1194,8 @@ static void agent_capture_obs(doom_agent_obs_t *o)
     line_t *door_line = NULL;
     int best_exit_absb = 1000;
     line_t *exit_line = NULL;
+    int best_switch_absb = 1000;
+    line_t *switch_line = NULL;
     for (int i = 0; i < DOOM_AGENT_NUM_RAYS; i++) {
         int bearing = ((i - ray_mid) * 2 * AGENT_FOV_DEG) / (DOOM_AGENT_NUM_RAYS - 1);
         boolean is_door = false;
@@ -973,6 +1209,16 @@ static void agent_capture_obs(doom_agent_obs_t *o)
             if (absb < best_exit_absb) {
                 best_exit_absb = absb;
                 exit_line = s_ray_exit_line;
+            }
+        }
+        /* A switch on the wall this ray stops at (most central one wins). */
+        if (s_ray_hit_line != NULL && s_ray_hit_frac > 0 &&
+            agent_frac_dist(s_ray_hit_frac) <= AGENT_SWITCH_RANGE &&
+            agent_line_shows_switch(pm, s_ray_hit_line)) {
+            int absb = bearing < 0 ? -bearing : bearing;
+            if (absb < best_switch_absb) {
+                best_switch_absb = absb;
+                switch_line = s_ray_hit_line;
             }
         }
         /* Report the closed door/passage in view so the agent can tell a re-shut
@@ -1004,6 +1250,13 @@ static void agent_capture_obs(doom_agent_obs_t *o)
         o->exit_sign_valid = true;
         o->exit_sign_bearing = agent_bearing_to(pm, mx, my);
         o->exit_sign_dist = P_AproxDistance(mx - pm->x, my - pm->y) >> FRACBITS;
+    }
+    if (switch_line != NULL) {
+        fixed_t mx = switch_line->v1->x / 2 + switch_line->v2->x / 2;
+        fixed_t my = switch_line->v1->y / 2 + switch_line->v2->y / 2;
+        o->switch_ahead_valid = true;
+        o->switch_ahead_bearing = agent_bearing_to(pm, mx, my);
+        o->switch_ahead_dist = P_AproxDistance(mx - pm->x, my - pm->y) >> FRACBITS;
     }
 
     agent_probe_use(pl, pm, o);

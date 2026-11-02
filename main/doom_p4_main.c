@@ -415,6 +415,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
                        "<div class=\"row\"><label>Green gain</label><input type=\"range\" name=\"green_gain\" min=\"50\" max=\"150\" value=\"%u\" oninput=\"gg.value=this.value\"><output id=\"gg\">%u</output></div>"
                        "<div class=\"row\"><label>Blue gain</label><input type=\"range\" name=\"blue_gain\" min=\"50\" max=\"150\" value=\"%u\" oninput=\"bg.value=this.value\"><output id=\"bg\">%u</output></div>"
                        "<div class=\"row\"><label>Audio volume</label><input type=\"range\" name=\"audio_volume\" min=\"0\" max=\"100\" value=\"%u\" oninput=\"av.value=this.value\"><output id=\"av\">%u</output></div>"
+                       "<div class=\"row\"><label>Audio status</label><span class=\"muted\">%s</span></div>"
                        "<div class=\"sw\"><div class=\"c\" style=\"background:#f00\"></div><div class=\"c\" style=\"background:#0f0\"></div><div class=\"c\" style=\"background:#00f\"></div></div>"
                        "<p><button type=\"submit\">Save settings</button></p></form></div>"
                        "<div class=\"panel\"><h3>Controller Test</h3><p class=\"muted\">Live DS4 state from USB host.</p><pre id=\"pad\">Waiting...</pre></div>"
@@ -432,7 +433,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
                        settings.red_gain, settings.red_gain,
                        settings.green_gain, settings.green_gain,
                        settings.blue_gain, settings.blue_gain,
-                       audio_volume, audio_volume);
+                       audio_volume, audio_volume, doom_audio_status());
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, page, len);
     free(page);
@@ -553,17 +554,17 @@ static esp_err_t api_settings_get_handler(httpd_req_t *req)
     panel_display_settings_t settings;
     panel_display_get_settings(&settings);
     uint8_t audio_volume = doom_audio_get_volume();
-    char json[320];
+    char json[480];
     int len = snprintf(json, sizeof(json),
                        "{\"rotation\":%u,\"rotation_text\":\"%s\",\"swap_red_blue\":%s,"
                        "\"invert_colors\":%s,\"show_fps\":%s,\"red_gain\":%u,\"green_gain\":%u,\"blue_gain\":%u,"
-                       "\"audio_volume\":%u}",
+                       "\"audio_volume\":%u,\"audio_status\":\"%s\"}",
                        (unsigned)settings.rotation, rotation_name(settings.rotation),
                        settings.swap_red_blue ? "true" : "false",
                        settings.invert_colors ? "true" : "false",
                        settings.show_fps ? "true" : "false",
                        settings.red_gain, settings.green_gain, settings.blue_gain,
-                       audio_volume);
+                       audio_volume, doom_audio_status());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, len);
     return ESP_OK;

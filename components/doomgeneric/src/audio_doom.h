@@ -11,3 +11,5 @@ uint8_t doom_audio_get_volume(void);
 void doom_audio_set_volume(uint8_t volume);
 esp_err_t doom_audio_load_settings(void);
 esp_err_t doom_audio_save_settings(uint8_t volume);
+/* "ok", or why there is no sound (codec not answering, setup failed...). */
+const char *doom_audio_status(void);

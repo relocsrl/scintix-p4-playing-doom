@@ -40,6 +40,32 @@ typedef struct {
     int  bearing_deg; /* -45..45 from facing: 0 = centre, negative = left, positive = right */
 } doom_agent_thing_t;
 
+/* A pickup lying in view (inside the field of view, in line of sight, within
+ * AGENT_ITEM_RANGE): what the player sees on the floor. Nearest first. */
+#define DOOM_AGENT_MAX_ITEMS 8
+typedef struct {
+    char        name[16];    /* "medikit", "clip", "blue_keycard", "shotgun", ... */
+    const char *kind;        /* "health", "armor", "ammo", "weapon", "key", "powerup" */
+    int         dist;        /* map units */
+    int         bearing_deg; /* -45..45 from facing, + = right */
+} doom_agent_item_t;
+
+/* A projectile in flight in view (imp fireball, rocket, ...), not the player's
+ * own. `incoming` = on its current course it reaches the player's body (its
+ * closest approach passes within the player's and its own radius, at a height
+ * the player occupies) — what a player judges from a fireball growing on screen.
+ * Nearest first. */
+#define DOOM_AGENT_MAX_MISSILES 6
+typedef struct {
+    char        name[16];    /* "imp_fireball", "rocket", ... */
+    int         dist;        /* map units */
+    int         bearing_deg; /* -45..45 from facing, + = right */
+    int         dz;          /* height of the projectile above the player's feet (map units) */
+    bool        incoming;
+    int         eta_tics;    /* incoming: game tics until it reaches the player */
+    const char *dodge;       /* incoming: "left" / "right" = the sidestep that takes the player off its line */
+} doom_agent_missile_t;
+
 /* Distance to the nearest wall/closed obstruction along a ray, like judging
  * depth in the rendered 3D view. Rays fan across the field of view only. */
 #define DOOM_AGENT_NUM_RAYS 51
@@ -63,6 +89,18 @@ typedef struct {
     int  episode, map;
     int  num_visible;
     doom_agent_thing_t visible[DOOM_AGENT_MAX_VISIBLE];
+    int  num_items;
+    doom_agent_item_t items[DOOM_AGENT_MAX_ITEMS];
+    int  num_missiles;
+    doom_agent_missile_t missiles[DOOM_AGENT_MAX_MISSILES];
+    /* The status bar: weapons owned (bit per weapontype_t, wp_fist = bit 0), keys
+     * held (bit per card_t: blue/yellow/red keycard, blue/yellow/red skull) and the
+     * ammo of every type (bullets, shells, cells, rockets — Doom's ammotype_t
+     * order) with its current maximum (doubled by a backpack). */
+    unsigned weapons_owned;
+    unsigned keys_held;
+    int  ammo_all[4];
+    int  ammo_max[4];
     int  num_rays;
     doom_agent_ray_t walls[DOOM_AGENT_NUM_RAYS];
     /* An openable-but-currently-closed obstruction in view (a door / closed
@@ -77,7 +115,8 @@ typedef struct {
     /* What is under the crosshair within USE reach (the 64-unit trace along the
      * facing that P_UseLines does): NULL = nothing (or a wall first: USE goes "oof"),
      * else "door", "lift" or "switch" - only what the player would see on screen
-     * (an exit switch is a "switch"). use_locked = a key door (colour-marked) the
+     * (an exit switch is a "switch"); "open_door" = a door already open (USE would
+     * close it). use_locked = a key door (colour-marked) the
      * player has no key for. */
     const char *use_target;
     bool use_locked;
@@ -86,6 +125,17 @@ typedef struct {
     bool exit_sign_valid;
     int  exit_sign_bearing;
     int  exit_sign_dist;
+    /* A switch panel not flipped yet on a wall a ray of the view reaches within
+     * 1024 units (the most central one): bearing / dist to the middle of its line. */
+    bool switch_ahead_valid;
+    int  switch_ahead_bearing;
+    int  switch_ahead_dist;
+    /* Health lost since the previous observation, and where the hit came from as
+     * the player perceives it (the red flash, the status-bar face turning toward the
+     * attacker, the stereo sound): "ahead", "left", "right", "behind", or NULL when
+     * there is no attacker (a damaging floor, a blast whose source is gone). */
+    int  hurt_amount;
+    const char *hurt_from;
     /* The floor under the player: damage per hit (every 32 tics) of a nukage /
      * slime / lava floor, 0 = safe; radiation suit tics left (protects from it). */
     int  floor_damage;

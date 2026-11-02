@@ -77,6 +77,35 @@ static char *build_obs_json(const doom_agent_obs_t *o)
         cJSON_AddNumberToObject(r, "episode", o->episode);
         cJSON_AddNumberToObject(r, "map", o->map);
 
+        /* The status bar: weapons owned, keys held, ammo of every type / its maximum. */
+        static const char *const weapon_names[] = {
+            "fist", "pistol", "shotgun", "chaingun", "rocket_launcher",
+            "plasma_rifle", "bfg9000", "chainsaw", "super_shotgun",
+        };
+        static const char *const key_names[] = {
+            "blue_keycard", "yellow_keycard", "red_keycard",
+            "blue_skullkey", "yellow_skullkey", "red_skullkey",
+        };
+        static const char *const ammo_names[] = {"bullets", "shells", "cells", "rockets"};
+        cJSON *weapons = cJSON_AddArrayToObject(r, "weapons");
+        for (int i = 0; weapons && i < (int)(sizeof(weapon_names) / sizeof(weapon_names[0])); i++) {
+            if (o->weapons_owned & (1u << i)) {
+                cJSON_AddItemToArray(weapons, cJSON_CreateString(weapon_names[i]));
+            }
+        }
+        cJSON *keys = cJSON_AddArrayToObject(r, "keys");
+        for (int i = 0; keys && i < (int)(sizeof(key_names) / sizeof(key_names[0])); i++) {
+            if (o->keys_held & (1u << i)) {
+                cJSON_AddItemToArray(keys, cJSON_CreateString(key_names[i]));
+            }
+        }
+        cJSON *ammo_all = cJSON_AddObjectToObject(r, "ammo_all");
+        cJSON *ammo_max = cJSON_AddObjectToObject(r, "ammo_max");
+        for (int i = 0; ammo_all && ammo_max && i < 4; i++) {
+            cJSON_AddNumberToObject(ammo_all, ammo_names[i], o->ammo_all[i]);
+            cJSON_AddNumberToObject(ammo_max, ammo_names[i], o->ammo_max[i]);
+        }
+
         /* Only what the player can see on screen (in the field of view, in line
          * of sight), left-to-right. No targeting hints. */
         cJSON *visible = cJSON_AddArrayToObject(r, "visible");
@@ -89,6 +118,38 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             cJSON_AddNumberToObject(t, "dist", o->visible[i].dist);
             cJSON_AddNumberToObject(t, "bearing", o->visible[i].bearing_deg);
             cJSON_AddItemToArray(visible, t);
+        }
+
+        /* Pickups lying in view (nearest first) and projectiles in flight in view. */
+        cJSON *items = cJSON_AddArrayToObject(r, "items");
+        for (int i = 0; items && i < o->num_items; i++) {
+            cJSON *t = cJSON_CreateObject();
+            if (!t) {
+                break;
+            }
+            cJSON_AddStringToObject(t, "name", o->items[i].name);
+            cJSON_AddStringToObject(t, "kind", o->items[i].kind);
+            cJSON_AddNumberToObject(t, "dist", o->items[i].dist);
+            cJSON_AddNumberToObject(t, "bearing", o->items[i].bearing_deg);
+            cJSON_AddItemToArray(items, t);
+        }
+        cJSON *missiles = cJSON_AddArrayToObject(r, "missiles");
+        for (int i = 0; missiles && i < o->num_missiles; i++) {
+            const doom_agent_missile_t *m = &o->missiles[i];
+            cJSON *t = cJSON_CreateObject();
+            if (!t) {
+                break;
+            }
+            cJSON_AddStringToObject(t, "name", m->name);
+            cJSON_AddNumberToObject(t, "dist", m->dist);
+            cJSON_AddNumberToObject(t, "bearing", m->bearing_deg);
+            cJSON_AddNumberToObject(t, "dz", m->dz);
+            cJSON_AddBoolToObject(t, "incoming", m->incoming);
+            if (m->incoming) {
+                cJSON_AddNumberToObject(t, "eta", m->eta_tics);
+                cJSON_AddStringToObject(t, "dodge", m->dodge ? m->dodge : "right");
+            }
+            cJSON_AddItemToArray(missiles, t);
         }
 
         /* Distance to the nearest wall along rays across the field of view. */
@@ -148,6 +209,26 @@ static char *build_obs_json(const doom_agent_obs_t *o)
             if (e) {
                 cJSON_AddNumberToObject(e, "bearing", o->exit_sign_bearing);
                 cJSON_AddNumberToObject(e, "dist", o->exit_sign_dist);
+            }
+        }
+        /* Hit since the last observation (absent when not): amount and side. */
+        if (o->hurt_amount > 0 || o->hurt_from) {
+            cJSON *h = cJSON_AddObjectToObject(r, "hurt");
+            if (h) {
+                cJSON_AddNumberToObject(h, "amount", o->hurt_amount);
+                if (o->hurt_from) {
+                    cJSON_AddStringToObject(h, "from", o->hurt_from);
+                } else {
+                    cJSON_AddNullToObject(h, "from");
+                }
+            }
+        }
+        /* A switch not flipped yet on a wall in view (absent when none). */
+        if (o->switch_ahead_valid) {
+            cJSON *s = cJSON_AddObjectToObject(r, "switch_ahead");
+            if (s) {
+                cJSON_AddNumberToObject(s, "bearing", o->switch_ahead_bearing);
+                cJSON_AddNumberToObject(s, "dist", o->switch_ahead_dist);
             }
         }
         /* True when a requested move barely shifted the player (ran into something). */
