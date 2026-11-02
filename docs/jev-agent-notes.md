@@ -160,6 +160,81 @@ configurations:
   auto`, default; `always`/`never` to force). The doorway benefit is taken where it
   matters without paying +23% in empty corridors. DryJev / regressions unaffected
   (they read `view.sectors`, always present).
+- **Left/right sweep in place (fixed 2026-11-02, L1 and L2 on the board):** the marine
+  stood still for 80+ decisions (`mv 0`) turning RRR LLLL RRR... Causes: (a) the view
+  is only +/-45 and Jev has no memory, so after each turn it forgot the open direction
+  it had just seen and turned back to "look again"; (b) `dithering` only caught strict
+  L/R/L/R alternation, not runs; (c) in L2 the commander's `target_heading` (0 = north)
+  pointed into the wall right in front, so `turn_hint` kept pulling it back to the
+  wall, then going_nowhere turned it away, and so on; (d) the supervisor returned
+  empty text (`max_tokens` 400 used up by the model's default adaptive thinking) so the
+  stale heading was never replaced. Fixes, all as facts in the state (no new override):
+  `Memory.note_view` keeps a **panorama** (depth per 10-deg compass bin, reset after
+  moving 64 units) and the state gets `best_seen` {heading, dist, bearing, side} when
+  stuck; `dithering` also = turns-only in both directions while going_nowhere
+  (`is_sweeping`); `commander.turn_hint` becomes `blocked` when the panorama shows a wall
+  on the target heading (`target_heading_open_dist` < 160) and `paused` while stuck;
+  instructions/criteria updated (keep turning the same way to best_seen, open path beats
+  turn_hint); DryJev uses best_seen. Supervisor: `max_tokens` 4000 + effort `low`, clear
+  error with `stop_reason` on an empty reply, system prompt says headings are not paths
+  and barrels are never targets. Verified: replay of the log's sweep (synthetic room)
+  -> `dithering` true, `turn_hint` blocked, DryJev out in 4 steps; sim regressions
+  (default identical to before, barrel, door) pass. **Not verified with real Jev.**
+- **Realtime: every decision one macro late (fixed 2026-11-02, L1 `--realtime` run):**
+  stuck ~110 decisions in a small room doing forward / L L / forward / R R. In
+  realtime the board answers one frame after the new keys go down, so the obs the
+  next decision was made from predated the macro just sent: after a turn_left the
+  next state still showed the old heading (35% of 572 turns in that run), Jev turned
+  again (60 deg instead of 30), and the following `forward` ran while the second turn
+  was still swinging it, into the wall (`BLOCKED` with ah ~290). `best_seen` was right
+  (heading ~290, 440 open) and Jev did pick forward there; the lag threw it off. Fix:
+  after sending a macro, wait until its hold expires, then take a fresh frame with an
+  empty `{"hold": true, "tics": 1}` (stays realtime; its `blocked` refers to the macro).
+  Halves the decision rate on the board (~1.7/s instead of ~3.5/s at ~280 ms Jev
+  latency) but each decision sees the result of the previous one. `--rt-pipelined`
+  restores the old behaviour. Sim (DryJev): stale-after-turn 50% -> 0%; lockstep
+  unchanged. **Not yet re-run on the board.**
+- **Invisible wall: pushing forever into an "open" direction (fixed 2026-11-02, L1 run):**
+  stuck 50+ decisions with `mv 0`, pattern `forward BLOCKED / turn_right / turn_left /
+  forward BLOCKED`, `ah465` every time. The firmware ray (`agent_ray_traverse`) stopped
+  only on one-sided/blocking lines or openings < 56 high, **not on a step up > 24 units**
+  (unwalkable in Doom), so the view read 465 open across a ledge; the panorama
+  ("latest look wins") re-learned 465 after every turn, so best_seen/way_out pointed
+  straight back at it. Two fixes: (a) agent: `Memory.note_walk_block` records the
+  heading of every forward/forward_long that comes back `blocked` (not with a monster
+  in the way), `mask_walk_blocks` lowers ray depths within +/-12 deg of it to 32 while
+  within 48 units of that spot (150 decisions), in place, so view/sectors/openings/
+  way_out/panorama all agree; `view.ahead_unwalkable` + legend sentence. Covers also
+  solid decorations and body-catching corners the rays can't show. (b) firmware: the
+  ray tracks the floor height along its path and stops at a step up > 24
+  (`s_ray_floor`, far side via `P_PointOnLineSide(trace...)`). Verified: synthetic
+  replay of the log (scratch test, DryJev) old = stuck 40/40 with the same pattern,
+  new = out at step 15; sim regressions (default, barrel, door) pass. **Firmware change
+  not built/flashed yet; agent not yet re-run with real Jev.**
+- **Floors: stairs, lifts, nukage (2026-11-02, firmware + agent):** Jev knew nothing
+  about heights (the agent didn't even pass `z`) and the automap drew EVERY discovered
+  line as `#`, so stairs looked like a stack of walls and nukage pools were invisible
+  (the marine died standing in them). Firmware (`doom_port.c` / `doom_agent.[ch]`):
+  each ray now reports `rise` (highest walkable floor above the player's, > 0 =
+  stairs/ramp up), `hurt` (distance to where a damaging floor begins) / `safe` (on a
+  damaging floor: distance to a safe one), only when present; the obs adds
+  `floor_damage` (sector specials 7=5, 5=10, 4/11/16=20) and `radsuit_tics`; a step
+  > 24 with a lift special (10/21/62/88/120-123) is reported as `door_ahead` with
+  `kind: "lift"`; the automap draws `#` only for lines that block walking, `:` for a
+  walkable step, `~` for the edge of a damaging floor, and no longer draws flat open
+  sector boundaries (an opened door disappears from the map). Agent: sectors get
+  `climb` / `hurt_dist`, `view.ahead_hurt_dist`, `floor` {hurts, radsuit, way_off}
+  while standing on one, `player.radsuit_secs`, `door_ahead.kind`; legend, macro
+  criteria, priority (0) "get off a damaging floor first", supervisor + MCP map
+  legends, DryJev. All new fields are optional: old firmware / the simulator just
+  don't send them. Verified with synthetic obs only; **firmware not built** (no IDF
+  on the machine of that session).
+- **Door: USE pressed out of reach (fixed 2026-11-02, L2 realtime run):** Jev pressed
+  `use` 3 times standing still at 78 units (USE reaches 64); the approach-door net let
+  it through (threshold 80, meant for momentum), the 3 misses marked a normal door
+  `wont_open`, and the marine swung left/right in front of it for 25 decisions (~1
+  min). Now `use_reaches()`: <= 64, or <= 80 only right after a forward move;
+  approach-door and the press counter both use it; criteria say `dist <= 60`.
 - **Game handling** (always on): death → wait 1 s, USE (level restarts); "frozen"
   game (8 steps with no change at all = intermission, or a menu) → USE/wait pulses,
   then "press Esc" hint; WebSocket/Wi-Fi loss → reconnect (10 attempts, backoff);

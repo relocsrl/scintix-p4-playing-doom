@@ -46,6 +46,12 @@ typedef struct {
 typedef struct {
     int bearing_deg;  /* -45..45 from facing: 0 = ahead, negative = left, positive = right */
     int dist;         /* map units to the first obstruction; clamped to the scan range if clear */
+    /* What the floor does along the ray, up to the obstruction (all walkable: a
+     * step up of more than 24 units is itself the obstruction). */
+    int rise;         /* highest floor reached above the player's floor: > 0 = stairs/ramp up */
+    int hurt;         /* on a safe floor: distance to where a damaging floor (nukage, slime,
+                         lava) begins; -1 = none before the obstruction */
+    int safe;         /* on a damaging floor: distance to where a safe floor begins; -1 = none */
 } doom_agent_ray_t;
 
 typedef struct {
@@ -66,6 +72,11 @@ typedef struct {
     bool door_ahead_valid;
     int  door_ahead_bearing; /* -45..45 relative to facing */
     int  door_ahead_dist;    /* map units */
+    bool door_ahead_lift;    /* it is a raised lift (USE lowers it, step on, it rises), not a door */
+    /* The floor under the player: damage per hit (every 32 tics) of a nukage /
+     * slime / lava floor, 0 = safe; radiation suit tics left (protects from it). */
+    int  floor_damage;
+    int  radsuit_tics;
     /* Set after a movement action when the player barely moved (ran into
      * something). false for pure observe/turn steps. */
     bool blocked;
@@ -73,7 +84,10 @@ typedef struct {
 
 /* ASCII automap: a bounded grid mirroring the player's in-game automap — only
  * the wall lines the player has already discovered, plus the player marker.
- * North is up. '#' = revealed wall, '@' = player, ' ' = undiscovered/empty.
+ * North is up. '#' = revealed wall (or a closed door / a step too high to climb),
+ * ':' = a step edge that can be walked over (stairs), '~' = the edge of a
+ * damaging floor, '@' = player, ' ' = undiscovered/empty (flat open boundaries
+ * between sectors are not drawn).
  * No monsters or items (the real automap doesn't show them without cheats). */
 #define DOOM_AGENT_MAP_COLS 64
 #define DOOM_AGENT_MAP_ROWS 32
