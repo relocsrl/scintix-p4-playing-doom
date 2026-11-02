@@ -203,7 +203,7 @@ Each release ships ready-to-flash images in [`binaries/`](binaries/)
 esptool commands. With Python and esptool 5.x (`pip install "esptool>=5"`):
 
 ```bat
-binaries\scintix-p4-doom-v0.6.2\flash.bat COM5
+binaries\scintix-p4-doom-v0.6.3\flash.bat COM5
 ```
 
 `flash.bat COM5 app` updates the firmware only (keeps the WAD, Wi-Fi and settings);
